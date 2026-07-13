@@ -8,11 +8,14 @@
 2. `docs/operations/README.md`
 3. 与任务相关的专题文档：
    - 运行模式：`docs/operations/DEPLOYMENT_MODES.md`
-   - upstream 同步和发布：`docs/operations/UPSTREAM_MAINTENANCE.md`
+   - 项目内部维护：`docs/operations/PROJECT_MAINTENANCE.md`
+   - upstream 同步：`docs/operations/UPSTREAM_MAINTENANCE.md`、`PATCH_QUEUE.md`
+   - 低间断应用契约：`docs/operations/ROLLING_RELEASE_CONTRACT.md`
+   - GitHub 治理：`docs/operations/GITHUB_GOVERNANCE.md`
 4. 涉及 AWS 或生产环境时：`infra/AGENTS.md` 和 `infra/docs/README.md`
 5. 应用开发细节：`DEV_GUIDE.md`、对应代码和测试
 
-文档可能滞后。可变事实必须以实时只读检查、发布清单和代码为准；发现漂移时在同一变更中更新文档。
+文档可能滞后。接手时并列核对 desired、actual、running artifact、approved/history 四条事实轴；实时状态证明“实际是什么”，不会自动成为获准期望。发现漂移时先报告，再在正确仓库修复。
 
 ## 工作区是两个 Git 仓库
 
@@ -35,9 +38,7 @@ git remote -v
 git log -1 --oneline --decorate
 
 if [ -d infra/.git ]; then
-  git -C infra status --short
-  git -C infra branch --show-current
-  git -C infra log -1 --oneline --decorate
+  infra/bin/codex-context.sh
 fi
 ```
 
@@ -46,6 +47,7 @@ fi
 - 保留工作区已有修改；不覆盖、不 reset、不把无关修改混进当前任务。
 - 搜索优先使用 `rg` / `rg --files`。
 - 不根据聊天记录猜测线上版本、账号数量、分组或 AWS 身份。
+- 不根据当前 `HEAD` 猜测线上源码。必须从私有 stable release manifest 沿 app tag、完整 SHA、镜像 digest 和 ops revision 闭环核对。
 - 用户只要求分析/诊断时，不执行部署、Terraform apply、账号修改或其他外部写操作。
 
 ## 产品和生产方向
@@ -71,6 +73,8 @@ fi
 - `origin` 是 fork；`upstream` 仅 fetch，push 必须保持禁用。
 - 已部署 release 分支和 tag 不重写历史。
 - 不把 `upstream/main` 直接合入生产分支。以明确 upstream release tag 创建 integration 分支，再逐项审查和重放本地 patch queue。
+- 不使用无范围的 `git fetch --tags`；upstream tag 拉入 `refs/tags/upstream/*`。同步/release preflight 必须要求 clean tree，并验证 `git remote get-url --push upstream` 等于 `DISABLED`。
+- `main` 是默认控制/接手分支，不代表部署；`integration/*` 用于集成，`release/*` 与 `frenzy/app/*` 固定已批准源码。upstream 同步本身不授权生产部署。
 - 能回馈 upstream 的通用修复优先提交 upstream；生产特有逻辑尽量留在配置或私有 ops 仓库。
 - 当前 fork 维护策略和命令见 `docs/operations/UPSTREAM_MAINTENANCE.md`。
 
@@ -96,4 +100,5 @@ fi
 - 生产身份、资源、发布清单和 AWS runbook 只写入私有 `infra/docs/`。
 - 每份可变状态文档标注 `observed_at` 或“截至日期”。
 - 每次发布更新私有基线和 release manifest；每次模式/架构决策更新对应专题文档。
+- fork 默认分支必须包含本文件和文档入口；不能只把接手知识留在某条 release 分支。
 - 文档不得成为秘密存储位置。
