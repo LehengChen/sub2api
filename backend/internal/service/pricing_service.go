@@ -192,6 +192,19 @@ func (s *PricingService) Initialize() error {
 		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to create data directory: %v", err)
 	}
 
+	if !s.cfg.Pricing.RemoteUpdatesEnabled {
+		pricingFile := s.getPricingFilePath()
+		if err := s.loadPricingData(pricingFile); err != nil {
+			logger.LegacyPrintf("service.pricing", "[Pricing] Remote updates disabled; local data unavailable, loading fallback: %v", err)
+			if err := s.useFallbackPricing(); err != nil {
+				return fmt.Errorf("failed to load offline pricing data: %w", err)
+			}
+		}
+
+		logger.LegacyPrintf("service.pricing", "[Pricing] Service initialized in offline mode with %d models", len(s.pricingData))
+		return nil
+	}
+
 	// 首次加载价格数据
 	if err := s.checkAndUpdatePricing(); err != nil {
 		logger.LegacyPrintf("service.pricing", "[Pricing] Initial load failed, using fallback: %v", err)

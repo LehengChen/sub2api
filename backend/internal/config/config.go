@@ -583,6 +583,8 @@ type TokenRefreshConfig struct {
 }
 
 type PricingConfig struct {
+	// 是否允许从远程源更新价格数据；关闭时仅使用本地缓存或镜像内回退文件
+	RemoteUpdatesEnabled bool `mapstructure:"remote_updates_enabled"`
 	// 价格数据远程URL（默认使用LiteLLM镜像）
 	RemoteURL string `mapstructure:"remote_url"`
 	// 哈希校验文件URL
@@ -1869,6 +1871,7 @@ func setDefaults() {
 	viper.SetDefault("rate_limit.oauth_401_cooldown_minutes", 10)
 
 	// Pricing - 从 model-price-repo 同步模型定价和上下文窗口数据（固定到 commit，避免分支漂移）
+	viper.SetDefault("pricing.remote_updates_enabled", true)
 	viper.SetDefault("pricing.remote_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json")
 	viper.SetDefault("pricing.hash_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256")
 	viper.SetDefault("pricing.data_dir", "./data")
