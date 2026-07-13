@@ -44,14 +44,16 @@ const (
 	defaultProxyProbeResponseMaxBytes = int64(1024 * 1024)
 )
 
-// probeURLs 按优先级排列的探测 URL 列表
-// 某些 AI API 专用代理只允许访问特定域名，因此需要多个备选
-var probeURLs = []struct {
+type proxyProbeTarget struct {
 	url    string
-	parser string // "ip-api" or "httpbin"
-}{
-	{"http://ip-api.com/json/?lang=zh-CN", "ip-api"},
-	{"http://httpbin.org/ip", "httpbin"},
+	parser string
+}
+
+// defaultProxyProbeTargets are HTTPS-only so testing a proxy never requires
+// opening plaintext port 80 on a fixed egress node.
+var defaultProxyProbeTargets = []proxyProbeTarget{
+	{"https://ipwho.is/?fields=success,message,ip,city,region,country,country_code", "ipwhois"},
+	{"https://httpbin.org/ip", "httpbin"},
 }
 
 type proxyProbeService struct {
@@ -59,6 +61,7 @@ type proxyProbeService struct {
 	allowPrivateHosts  bool
 	validateResolvedIP bool
 	maxResponseBytes   int64
+	probeTargets       []proxyProbeTarget
 }
 
 func (s *proxyProbeService) ProbeProxy(ctx context.Context, proxyURL string) (*service.ProxyExitInfo, int64, error) {
@@ -73,8 +76,13 @@ func (s *proxyProbeService) ProbeProxy(ctx context.Context, proxyURL string) (*s
 		return nil, 0, fmt.Errorf("failed to create proxy client: %w", err)
 	}
 
+	probes := s.probeTargets
+	if len(probes) == 0 {
+		probes = defaultProxyProbeTargets
+	}
+
 	var lastErr error
-	for _, probe := range probeURLs {
+	for _, probe := range probes {
 		exitInfo, latencyMs, err := s.probeWithURL(ctx, client, probe.url, probe.parser)
 		if err == nil {
 			return exitInfo, latencyMs, nil
@@ -117,8 +125,8 @@ func (s *proxyProbeService) probeWithURL(ctx context.Context, client *http.Clien
 	}
 
 	switch parser {
-	case "ip-api":
-		return s.parseIPAPI(body, latencyMs)
+	case "ipwhois":
+		return s.parseIPWhoIs(body, latencyMs)
 	case "httpbin":
 		return s.parseHTTPBin(body, latencyMs)
 	default:
@@ -126,16 +134,15 @@ func (s *proxyProbeService) probeWithURL(ctx context.Context, client *http.Clien
 	}
 }
 
-func (s *proxyProbeService) parseIPAPI(body []byte, latencyMs int64) (*service.ProxyExitInfo, int64, error) {
+func (s *proxyProbeService) parseIPWhoIs(body []byte, latencyMs int64) (*service.ProxyExitInfo, int64, error) {
 	var ipInfo struct {
-		Status      string `json:"status"`
+		Success     bool   `json:"success"`
 		Message     string `json:"message"`
-		Query       string `json:"query"`
+		IP          string `json:"ip"`
 		City        string `json:"city"`
 		Region      string `json:"region"`
-		RegionName  string `json:"regionName"`
 		Country     string `json:"country"`
-		CountryCode string `json:"countryCode"`
+		CountryCode string `json:"country_code"`
 	}
 
 	if err := json.Unmarshal(body, &ipInfo); err != nil {
@@ -145,21 +152,20 @@ func (s *proxyProbeService) parseIPAPI(body []byte, latencyMs int64) (*service.P
 		}
 		return nil, latencyMs, fmt.Errorf("failed to parse response: %w (body: %s)", err, preview)
 	}
-	if strings.ToLower(ipInfo.Status) != "success" {
+	if !ipInfo.Success {
 		if ipInfo.Message == "" {
-			ipInfo.Message = "ip-api request failed"
+			ipInfo.Message = "ipwho.is request failed"
 		}
-		return nil, latencyMs, fmt.Errorf("ip-api request failed: %s", ipInfo.Message)
+		return nil, latencyMs, fmt.Errorf("ipwho.is request failed: %s", ipInfo.Message)
+	}
+	if strings.TrimSpace(ipInfo.IP) == "" {
+		return nil, latencyMs, fmt.Errorf("ipwho.is: no IP found in response")
 	}
 
-	region := ipInfo.RegionName
-	if region == "" {
-		region = ipInfo.Region
-	}
 	return &service.ProxyExitInfo{
-		IP:          ipInfo.Query,
+		IP:          ipInfo.IP,
 		City:        ipInfo.City,
-		Region:      region,
+		Region:      ipInfo.Region,
 		Country:     ipInfo.Country,
 		CountryCode: ipInfo.CountryCode,
 	}, latencyMs, nil
