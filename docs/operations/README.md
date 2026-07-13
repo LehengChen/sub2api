@@ -7,9 +7,15 @@
 | 文档 | 说明 |
 |---|---|
 | [`../../AGENTS.md`](../../AGENTS.md) | 新 Codex 会话的总入口、边界和验证规则 |
+| [`PROJECT_MAINTENANCE.md`](PROJECT_MAINTENANCE.md) | 双仓库职责、事实轴、变更分类和内部维护生命周期 |
 | [`DEPLOYMENT_MODES.md`](DEPLOYMENT_MODES.md) | Simple、Standard、Backend Mode、分组类型和部署拓扑的区别 |
-| [`UPSTREAM_MAINTENANCE.md`](UPSTREAM_MAINTENANCE.md) | fork/upstream 同步、patch queue、测试、发布和回滚规范 |
-| [`../../DEV_GUIDE.md`](../../DEV_GUIDE.md) | 应用开发环境和常见工程问题；其中版本信息需以代码为准 |
+| [`UPSTREAM_MAINTENANCE.md`](UPSTREAM_MAINTENANCE.md) | fork/upstream 同步状态机、候选 promotion 和停止条件 |
+| [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md) | 当前 deployed/upstream 差距的带日期快照 |
+| [`PATCH_QUEUE.md`](PATCH_QUEUE.md) | Frenzy runtime patch 的稳定 ID、行为不变量和删除条件 |
+| [`UPGRADE_COMPATIBILITY_TEMPLATE.md`](UPGRADE_COMPATIBILITY_TEMPLATE.md) | 每次 upstream 升级的 migration/config/回滚审查模板 |
+| [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) | readiness、drain、N/N-1、migration 和多副本应用契约 |
+| [`GITHUB_GOVERNANCE.md`](GITHUB_GOVERNANCE.md) | fork CI、分支/tag 保护的期望与实际状态 |
+| [`../../DEV_GUIDE.md`](../../DEV_GUIDE.md) | 本地开发示例；Git/upstream 和生产规则不在该文件定义 |
 
 若工作区同时存在私有 `infra/` 仓库，再阅读：
 
@@ -17,17 +23,16 @@
 - `infra/docs/README.md`
 - `infra/releases/` 中当前环境的 release manifest
 
-## 信息分层
+## 四条事实轴
 
-从高到低采用以下事实优先级：
+不要用一条线性优先级让某类事实覆盖另一类：
 
-1. 实时只读检查：运行中的应用、AWS API、数据库/API 的脱敏状态
-2. 私有运维仓库中的 release manifest 和 Terraform state 所描述的资源
-3. 当前应用 release tag、镜像 digest 和配置 revision
-4. 代码、迁移和测试
-5. 文档快照与历史对话
+1. Desired：Git 中应用、Terraform 和版本化非敏感配置说明“应该是什么”。
+2. Actual：实时应用/AWS API 与 remote state 说明“实际是什么”。
+3. Artifact：app tag/SHA、镜像 digest、AMI/CA/SSM version 说明“运行的是什么”。
+4. Approved/history：change、release manifest、tag 和测试证据说明“谁批准、发生过什么”。
 
-文档与代码冲突时，以代码和实时状态为准，并在本次工作中修正文档。不能用文档替代生产检查。
+四条轴必须闭环；不一致就是 drift。实时状态不能自动覆盖 Git 中的批准期望，文档也不能替代生产检查。
 
 ## 两个仓库的职责
 
@@ -48,5 +53,6 @@
 
 - 模式语义变化时更新 `DEPLOYMENT_MODES.md`。
 - remote、branch、patch queue 或发布流程变化时更新 `UPSTREAM_MAINTENANCE.md`。
+- upstream commit/tag 的可变快照只更新 `UPSTREAM_STATUS.md`，不污染稳定流程。
 - 生产部署后更新私有 baseline 和 release manifest，不在公开文档复制生产秘密。
 - 文件中出现的 commit 数和版本均须标明观察日期；它们是快照，不是永久事实。

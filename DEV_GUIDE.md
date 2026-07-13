@@ -1,346 +1,124 @@
-# sub2api 项目开发指南
+# Sub2API 本地开发指南
 
-> 本文档记录项目环境配置、常见坑点和注意事项，供 Claude Code 和团队成员参考。
+本文只说明本地开发和工程验证。项目接手、upstream、生产发布和 AWS 规则分别以 [`AGENTS.md`](AGENTS.md)、[`docs/operations/`](docs/operations/README.md) 和私有 `infra/AGENTS.md` 为准；不要从本文件推导生产操作。
 
-## 一、项目基本信息
+Windows/PostgreSQL 手工配置仅是开发者个人环境选择，不是项目基线。开发数据库必须使用本地专用凭据，禁止复用生产 secret、导出生产账号数据或临时把认证改成 `trust` 后遗忘恢复。
 
-| 项目 | 说明 |
-|------|------|
-| **上游仓库** | Wei-Shaw/sub2api |
-| **Fork 仓库** | LehengChen/sub2api |
-| **技术栈** | Go 后端 (Ent ORM + Gin) + Vue3 前端 (pnpm) |
-| **数据库** | PostgreSQL 16 + Redis |
-| **包管理** | 后端: go modules, 前端: **pnpm**（不是 npm） |
+## 工程事实来源
 
-## 二、本地环境配置
+| 项目 | 权威来源 |
+|---|---|
+| Go 版本 | `backend/go.mod` 的 `go` directive；CI 使用 `go-version-file` |
+| golangci-lint 版本 | `.github/workflows/backend-ci.yml` |
+| Node/pnpm | workflow 与 `frontend/pnpm-lock.yaml` |
+| 后端命令 | `backend/Makefile` |
+| 前端命令 | `frontend/package.json` |
+| 运行配置 | `backend/internal/config/` 与 `deploy/config.example.yaml` |
 
-### PostgreSQL 16 (Windows 服务)
+截至 2026-07-13，`go.mod` 为 Go 1.26.5，fork CI 配置 golangci-lint v2.9。版本变化时修改代码/workflow，不在文档维护另一套固定常量。
 
-| 配置项 | 值 |
-|--------|-----|
-| 端口 | 5432 |
-| psql 路径 | `C:\Program Files\PostgreSQL\16\bin\psql.exe` |
-| pg_hba.conf | `C:\Program Files\PostgreSQL\16\data\pg_hba.conf` |
-| 数据库凭据 | user=`sub2api`, password=`sub2api`, dbname=`sub2api` |
-| 超级用户 | user=`postgres`, password=`postgres` |
+## 本地启动
 
-### Redis
+### Docker Compose
 
-| 配置项 | 值 |
-|--------|-----|
-| 端口 | 6379 |
-| 密码 | 无 |
-
-### 开发工具
+仓库提供从本地源码构建的开发 Compose：
 
 ```bash
-# golangci-lint v2.7
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7
-
-# pnpm (前端包管理)
-npm install -g pnpm
+cd deploy
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-## 三、CI/CD 流水线
+先在未提交的本地 `.env` 中设置 Compose 要求的密码/secret。不要把 `.env`、数据库 volume、token、Cookie 或账号导出提交到 Git。
 
-### GitHub Actions Workflows
+其他部署文件的定位：
 
-| Workflow | 触发条件 | 检查内容 |
-|----------|----------|----------|
-| **backend-ci.yml** | push, pull_request | 单元测试 + 集成测试 + golangci-lint v2.7 |
-| **security-scan.yml** | push, pull_request, 每周一 | govulncheck + gosec + pnpm audit |
-| **release.yml** | tag `v*` | 构建发布（PR 不触发） |
+- `docker-compose.yml`：完整单机部署；
+- `docker-compose.standalone.yml`：应用外接 PostgreSQL/Redis；
+- `docker-compose.local.yml`：本地镜像/配置场景；
+- `docker-compose.dev.yml`：从当前工作区 build。
 
-### CI 要求
+### 直接运行
 
-- Go 版本必须是 **1.25.7**
-- 前端使用 `pnpm install --frozen-lockfile`，必须提交 `pnpm-lock.yaml`
-
-### 本地测试命令
+若 PostgreSQL/Redis 已在本地准备好：
 
 ```bash
-# 后端单元测试
-cd backend && go test -tags=unit ./...
-
-# 后端集成测试
-cd backend && go test -tags=integration ./...
-
-# 代码质量检查
-cd backend && golangci-lint run ./...
-
-# 前端依赖安装（必须用 pnpm）
-cd frontend && pnpm install
-```
-
-## 四、常见坑点 & 解决方案
-
-### 坑 1：pnpm-lock.yaml 必须同步提交
-
-**问题**：`package.json` 新增依赖后，CI 的 `pnpm install --frozen-lockfile` 失败。
-
-**原因**：上游 CI 使用 pnpm，lock 文件不同步会报错。
-
-**解决**：
-```bash
-cd frontend
-pnpm install  # 更新 pnpm-lock.yaml
-git add pnpm-lock.yaml
-git commit -m "chore: update pnpm-lock.yaml"
-```
-
----
-
-### 坑 2：npm 和 pnpm 的 node_modules 冲突
-
-**问题**：之前用 npm 装过 `node_modules`，pnpm install 报 `EPERM` 错误。
-
-**解决**：
-```bash
-cd frontend
-rm -rf node_modules  # 或 PowerShell: Remove-Item -Recurse -Force node_modules
-pnpm install
-```
-
----
-
-### 坑 3：PowerShell 中 bcrypt hash 的 `$` 被转义
-
-**问题**：bcrypt hash 格式如 `$2a$10$xxx...`，PowerShell 把 `$2a` 当变量解析，导致数据丢失。
-
-**解决**：将 SQL 写入文件，用 `psql -f` 执行：
-```bash
-# 错误示范（PowerShell 会吃掉 $）
-psql -c "INSERT INTO users ... VALUES ('$2a$10$...')"
-
-# 正确做法
-echo "INSERT INTO users ... VALUES ('\$2a\$10\$...')" > temp.sql
-psql -U sub2api -h 127.0.0.1 -d sub2api -f temp.sql
-```
-
----
-
-### 坑 4：psql 不支持中文路径
-
-**问题**：`psql -f "D:\中文路径\file.sql"` 报错找不到文件。
-
-**解决**：复制到纯英文路径再执行：
-```bash
-cp "D:\中文路径\file.sql" "C:\temp.sql"
-psql -f "C:\temp.sql"
-```
-
----
-
-### 坑 5：PostgreSQL 密码重置流程
-
-**场景**：忘记 PostgreSQL 密码。
-
-**步骤**：
-1. 修改 `C:\Program Files\PostgreSQL\16\data\pg_hba.conf`
-   ```
-   # 将 scram-sha-256 改为 trust
-   host    all    all    127.0.0.1/32    trust
-   ```
-2. 重启 PostgreSQL 服务
-   ```powershell
-   Restart-Service postgresql-x64-16
-   ```
-3. 无密码登录并重置
-   ```bash
-   psql -U postgres -h 127.0.0.1
-   ALTER USER sub2api WITH PASSWORD 'sub2api';
-   ALTER USER postgres WITH PASSWORD 'postgres';
-   ```
-4. 改回 `scram-sha-256` 并重启
-
----
-
-### 坑 6：Go interface 新增方法后 test stub 必须补全
-
-**问题**：给 interface 新增方法后，编译报错 `does not implement interface (missing method XXX)`。
-
-**原因**：所有测试文件中实现该 interface 的 stub/mock 都必须补上新方法。
-
-**解决**：
-```bash
-# 搜索所有实现该 interface 的 struct
-cd backend
-grep -r "type.*Stub.*struct" internal/
-grep -r "type.*Mock.*struct" internal/
-
-# 逐一补全新方法
-```
-
----
-
-### 坑 7：Windows 上 psql 连 localhost 的 IPv6 问题
-
-**问题**：psql 连 `localhost` 先尝试 IPv6 (::1)，可能报错后再回退 IPv4。
-
-**建议**：直接用 `127.0.0.1` 代替 `localhost`。
-
----
-
-### 坑 8：Windows 没有 make 命令
-
-**问题**：CI 里用 `make test-unit`，本地 Windows 没有 make。
-
-**解决**：直接用 Makefile 里的原始命令：
-```bash
-# 代替 make test-unit
-go test -tags=unit ./...
-
-# 代替 make test-integration
-go test -tags=integration ./...
-```
-
----
-
-### 坑 9：Ent Schema 修改后必须重新生成
-
-**问题**：修改 `ent/schema/*.go` 后，代码不生效。
-
-**解决**：
-```bash
-cd backend
-go generate ./ent  # 重新生成 ent 代码
-git add ent/       # 生成的文件也要提交
-```
-
----
-
-### 坑 10：前端测试看似正常，但后端调用失败（模型映射被批量误改）
-
-**典型现象**：
-- 前端按钮点测看起来正常；
-- 实际通过 API/客户端调用时返回 `Service temporarily unavailable` 或提示无可用账号；
-- 常见于 OpenAI 账号（例如 Codex 模型）在批量修改后突然不可用。
-
-**根因**：
-- OpenAI 账号编辑页默认不显式展示映射规则，容易让人误以为“没映射也没关系”；
-- 但在**批量修改同时选中不同平台账号**（OpenAI + Antigravity/Gemini）时，模型白名单/映射可能被跨平台策略覆盖；
-- 结果是 OpenAI 账号的关键模型映射丢失或被改坏，后端选不到可用账号。
-
-**修复方案（按优先级）**：
-1. **快速修复（推荐）**：在批量修改中补回正确的透传映射（例如 `gpt-5.3-codex -> gpt-5.3-codex-spark`）。
-2. **彻底重建**：删除并重新添加全部相关账号（最稳但成本高）。
-
-**关键经验**：
-- 如果某模型已被软件内置默认映射覆盖，通常不需要额外再加透传；
-- 但当上游模型更新快于本仓库默认映射时，**手动批量添加透传映射**是最简单、最低风险的临时兜底方案；
-- 批量操作前尽量按平台分组，不要混选不同平台账号。
-
----
-
-### 坑 11：PR 提交前检查清单
-
-提交 PR 前务必本地验证：
-
-- [ ] `go test -tags=unit ./...` 通过
-- [ ] `go test -tags=integration ./...` 通过
-- [ ] `golangci-lint run ./...` 无新增问题
-- [ ] `pnpm-lock.yaml` 已同步（如果改了 package.json）
-- [ ] 所有 test stub 补全新接口方法（如果改了 interface）
-- [ ] Ent 生成的代码已提交（如果改了 schema）
-
-## 五、常用命令速查
-
-### 数据库操作
-
-```bash
-# 连接数据库
-psql -U sub2api -h 127.0.0.1 -d sub2api
-
-# 查看所有用户
-psql -U postgres -h 127.0.0.1 -c "\du"
-
-# 查看所有数据库
-psql -U postgres -h 127.0.0.1 -c "\l"
-
-# 执行 SQL 文件
-psql -U sub2api -h 127.0.0.1 -d sub2api -f migration.sql
-```
-
-### Git 操作
-
-```bash
-# 同步上游
-git fetch upstream
-git checkout main
-git merge upstream/main
-git push origin main
-
-# 创建功能分支
-git checkout -b feature/xxx
-
-# Rebase 到最新 main
-git fetch upstream
-git rebase upstream/main
-```
-
-### 前端操作
-
-```bash
-# 安装依赖（必须用 pnpm）
-cd frontend
-pnpm install
-
-# 开发服务器
-pnpm dev
-
-# 构建
-pnpm build
-```
-
-### 后端操作
-
-```bash
-# 运行服务器
 cd backend
 go run ./cmd/server/
+```
 
-# 生成 Ent 代码
+运行参数以配置代码和示例为准。开发环境也不要在命令行历史中直接展开真实凭据。
+
+## 常用验证
+
+```bash
+# backend
+(cd backend && go test -tags=unit ./...)
+(cd backend && go test -tags=integration ./...)
+(cd backend && golangci-lint run ./...)
+
+# frontend
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend run lint:check
+pnpm --dir frontend run typecheck
+pnpm --dir frontend run test:run
+pnpm --dir frontend run build
+```
+
+当前 `.github/workflows/backend-ci.yml` 实际执行 backend unit/integration、frontend lint/typecheck 加关键 Vitest 子集，以及 golangci-lint。`.github/workflows/security-scan.yml` 实际执行 govulncheck 和带例外文件的 production pnpm audit；它当前没有 gosec 或容器扫描。release candidate 仍要按 [`docs/operations/PROJECT_MAINTENANCE.md`](docs/operations/PROJECT_MAINTENANCE.md) 执行完整验证，不能把 CI 子集写成完整发布证明。
+
+## 生成代码
+
+修改 Ent schema：
+
+```bash
+cd backend
 go generate ./ent
-
-# 运行测试
-go test -tags=unit ./...
-go test -tags=integration ./...
-
-# Lint 检查
-golangci-lint run ./...
+git diff -- ent migrations
 ```
 
-## 六、项目结构速览
+修改 Wire providers：
 
-```
-sub2api-bmai/
-├── backend/
-│   ├── cmd/server/          # 主程序入口
-│   ├── ent/                 # Ent ORM 生成代码
-│   │   └── schema/          # 数据库 Schema 定义
-│   ├── internal/
-│   │   ├── handler/         # HTTP 处理器
-│   │   ├── service/         # 业务逻辑
-│   │   ├── repository/      # 数据访问层
-│   │   └── server/          # 服务器配置
-│   ├── migrations/          # 数据库迁移脚本
-│   └── config.yaml          # 配置文件
-├── frontend/
-│   ├── src/
-│   │   ├── api/             # API 调用
-│   │   ├── components/      # Vue 组件
-│   │   ├── views/           # 页面视图
-│   │   ├── types/           # TypeScript 类型
-│   │   └── i18n/            # 国际化
-│   ├── package.json         # 依赖配置
-│   └── pnpm-lock.yaml       # pnpm 锁文件（必须提交）
-└── .claude/
-    └── CLAUDE.md            # 本文档
+```bash
+cd backend
+go generate ./cmd/server
+git diff -- cmd/server
 ```
 
-## 七、参考资源
+生成文件只能由生成器更新。已执行的 SQL migration 不修改 checksum；新变化增加 migration，并完成 N/N-1 和回滚审查。
 
-- [上游仓库](https://github.com/Wei-Shaw/sub2api)
-- [Ent 文档](https://entgo.io/docs/getting-started)
-- [Vue3 文档](https://vuejs.org/)
-- [pnpm 文档](https://pnpm.io/)
+## 常见工程问题
+
+### Lockfile
+
+修改 `frontend/package.json` 后使用 pnpm 重生成并提交 `pnpm-lock.yaml`。不要混用 npm 生成的 lockfile；CI 安装使用 `--frozen-lockfile`。
+
+### Interface 与 test doubles
+
+Go interface 新增方法后，所有 stub/mock 必须一起补全。优先用 `rg 'type .*Stub|type .*Mock' backend/internal` 查找受影响实现，并运行相关 package tests。
+
+### 模型映射的批量修改
+
+不要同时批量修改不同平台账号的模型白名单/映射。上游模型变化快于默认映射时，可以在单个平台的 canary 账号上增加经过验证的临时透传映射，但必须记录原因、测试和删除条件；先验证真实 API 请求、分组调度与计费，再推广到生产账号池。
+
+### Windows
+
+Windows 本地环境建议优先使用 Docker Desktop/WSL。PowerShell 会解释 `$`，因此 bcrypt、token 等值不要拼进双引号命令；使用参数化脚本或仅限本地、受忽略且权限受控的输入文件。`localhost` 有 IPv4/IPv6 差异时显式使用预期地址。
+
+## Git 边界
+
+普通功能分支从 fork `main` 建立并通过 PR 合并。upstream integration 不使用这里的普通 Git 快捷方式；必须完整执行 [`docs/operations/UPSTREAM_MAINTENANCE.md`](docs/operations/UPSTREAM_MAINTENANCE.md)。尤其禁止：
+
+- 直接 `git merge upstream/main` 到 `main`/release；
+- 直接 `git rebase upstream/main` 后覆盖 fork 历史；
+- 向 upstream remote push；
+- 用当前 `HEAD` 猜测已部署源码。
+
+## PR 最小检查
+
+- 工作区没有混入无关修改或 secret。
+- 相关 unit/integration/Vitest 通过。
+- lint、typecheck 和 build 与改动匹配。
+- `go.mod`/lockfile/生成文件一致。
+- schema/config 变化有兼容和回滚结论。
+- Frenzy runtime 差异已更新稳定 Patch ID ledger。
+- upstream、发布或生产变化已进入各自权威 runbook，不在 PR 描述里临时发明流程。
