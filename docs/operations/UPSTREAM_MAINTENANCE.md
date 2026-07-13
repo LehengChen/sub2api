@@ -1,172 +1,225 @@
-# Fork、Upstream 与应用发布维护
+# Fork 与 Upstream 同步流程
 
-目标是让本地定制保持为小而清晰的 patch queue，并让每次生产版本都能追溯到明确的 upstream tag、fork revision、镜像 digest 和私有配置 revision。
+本文是 Frenzy fork 接收 upstream release 的唯一权威流程。它只负责形成可审查的应用候选；是否部署到生产，必须在私有 `infra/` 仓库中另行批准和执行。
 
-## 仓库角色
+当前 commit、tag 和差距属于可变事实，统一记录在 [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md)。本地运行时差异记录在 [`PATCH_QUEUE.md`](PATCH_QUEUE.md)。不要把快照数字写回本流程。
 
-```text
-upstream  https://github.com/Wei-Shaw/sub2api   只读上游
-origin    https://github.com/LehengChen/sub2api fork
-```
+## 不变量
 
-`upstream` 的 push URL 应保持禁用。私有 AWS 代码属于 `LehengChen/sub2api-ops`，不能提交到公开应用 fork。
+- `origin` 是 `LehengChen/sub2api`；`upstream` 是只读的 `Wei-Shaw/sub2api`。
+- `git remote get-url --push upstream` 必须为 `DISABLED`。
+- 已部署版本从私有 release manifest 的 `deployed_tag`（或历史等价字段）读取，不能用分支 `HEAD`、最新 tag 或聊天记录猜测。
+- 默认分支 `main` 是 fork 的维护和接手入口，不自动代表线上版本。
+- upstream 同步不等于生产发布授权；应用仓库不执行 ECR、SSM、Terraform 或 rollout。
+- 已发布的 `release/*` 分支和 `frenzy/app/*` tag 不 rebase、不 force-push、不移动。
+- 不把 `upstream/main` 直接 merge/rebase 到 `main` 或生产 release；每次只从一个明确的 upstream 正式 tag 建立 integration。
+- 不用无范围的 `git fetch --tags`。upstream tag 进入独立的 `refs/tags/upstream/*` 命名空间，避免与 fork tag 冲突。
+- 每个本地运行时补丁必须有稳定 Patch ID、明确处置和定向测试。clean cherry-pick 只说明文本可应用，不说明语义正确。
 
-## 截至 2026-07-13 的基线快照
-
-- 当前部署分支：`release/e316ebf5-frenzy.1`
-- upstream base：`e316ebf5`，对应 v0.1.151 时期
-- fork release tag：`frenzy/app/v0.1.151-e316ebf5.1`
-- 已部署源码 tag 在 base 上有 3 个本地代码提交
-- upstream 最新正式 tag：`v0.1.153`
-- `upstream/main`：`7d239d62`，比 v0.1.153 再前进 5 个提交
-- 已部署源码 revision 相对 `upstream/main`：本地 3 个、上游 85 个提交
-- release 分支在已部署 revision 之后还有运维文档提交；这些提交没有进入当前运行镜像
-
-这只是观察快照。开始升级前必须重新 fetch，并分别计算“已部署源码 tag”和“目标集成分支”的差距；不能把后续纯文档提交误认为已部署应用代码。
-
-## 当前本地 patch queue
-
-| Commit | 目的 | 下一次升级处理 |
-|---|---|---|
-| `1f2caaba` | 代理出口探测仅使用 HTTPS | 检查 upstream 是否已等价实现；否则保留并争取贡献 upstream |
-| `c9be8c6e` | 隔离环境的离线 pricing 模式 | upstream pricing 代码已变化，需按新结构重新审查，禁止盲目 cherry-pick |
-| `3c39b35c` | 运行时依赖安全升级 | 重新扫描新 upstream；若已包含等价版本则删除本地补丁 |
-
-长期目标是把 patch queue 缩到最小。通用修复进入 upstream 后，在下一个 fork release 中删除本地版本。
-
-## 分支和 tag 规范
-
-建议：
+## 分支、tag 与职责
 
 ```text
-integration/v<upstream>-frenzy.<n>   临时集成和测试
-release/<upstream>-frenzy.<n>       已批准的生产源码
-frenzy/app/v<upstream>-frenzy.<n>    不可变应用 tag
+main                                  fork 默认控制分支；文档、CI、已批准维护状态
+integration/v<upstream>-frenzy.<n>    一次 upstream 集成；冲突、补丁重放和验证
+release/v<upstream>-frenzy.<n>        固定候选 SHA 后创建；不继续开发
+contrib/<topic>                       可单独回馈 upstream 的通用修复
+frenzy/app/v<upstream>-frenzy.<n>     指向 release SHA 的不可变 annotated tag
+refs/tags/upstream/v<upstream>        本地保存的 upstream tag 对象
 ```
 
-规则：
+历史 release/tag 的命名可能不同，继续保留，不为了统一格式改写历史。新的 release 使用上面的规范。
 
-- deployed release 分支和 tag 不 rebase、不 force-push。
-- 不在生产 release 分支直接开发。
-- 不把 `upstream/main` 直接 merge 到生产；优先选择正式 upstream tag。
-- 一个 release 只做一种升级：upstream 应用升级与 `RUN_MODE`/基础设施迁移分开。
+## 同步状态机
 
-## Upstream 升级流程
+### 0. 取得已部署事实
 
-### 1. 只读盘点
+先阅读私有 ops 仓库中当前环境最新、状态为 stable 的 release manifest，手工核对并设置：
 
 ```bash
-git fetch upstream --prune --tags
-git fetch origin --prune
-git status --short
-git rev-list --left-right --count HEAD...upstream/main
-git log --oneline --decorate HEAD..upstream/main
-git cherry upstream/main HEAD
+DEPLOYED_APP_TAG='frenzy/app/<verified-tag>'
+OLD_BASE='<verified-upstream-base-sha>'
+UPSTREAM_TAG='v<target-version>'
+RELEASE_NO='<n>'
 ```
 
-确认工作区无意外修改，并记录目标 upstream tag 的 release notes、安全修复和迁移文件。
+manifest schema 尚未统一时，不要写一个“猜字段”的自动解析器。必须同时核对 tag、完整源码 SHA、镜像 digest 和 ops revision；缺少其中任一项就停止。
 
-### 2. 从明确 tag 创建集成分支
+### 1. Fail-closed preflight
 
-示例：
+从应用仓库根目录执行：
 
 ```bash
-git switch --create integration/v0.1.153-frenzy.1 v0.1.153
+test -z "$(git status --porcelain)"
+test "$(git remote get-url origin)" = "https://github.com/LehengChen/sub2api.git"
+test "$(git remote get-url upstream)" = "https://github.com/Wei-Shaw/sub2api"
+test "$(git remote get-url --push upstream)" = "DISABLED"
+git rev-parse --verify "refs/tags/${DEPLOYED_APP_TAG}^{commit}"
+git merge-base --is-ancestor "$OLD_BASE" "$DEPLOYED_APP_TAG"
 ```
 
-不要先 merge 当前 release；先逐个判断三个本地补丁是否仍需要。需要的补丁以独立 commit 重放；已被 upstream 吸收或不再适用的补丁直接删除。冲突解决后使用 `git range-diff` 审查语义，而不只看是否能编译。
+工作区有用户修改时先保存或提交到正确分支，不能 reset；remote、tag 或祖先关系不符时停止并调查。
+
+### 2. 只读取目标 upstream tag
 
 ```bash
-git range-diff <old-base>..<old-release> v0.1.153..<integration-branch>
+git fetch --no-tags --prune upstream '+refs/heads/*:refs/remotes/upstream/*'
+git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+git ls-remote --tags upstream \
+  "refs/tags/${UPSTREAM_TAG}" \
+  "refs/tags/${UPSTREAM_TAG}^{}"
+
+git fetch --no-tags upstream \
+  "refs/tags/${UPSTREAM_TAG}:refs/tags/upstream/${UPSTREAM_TAG}"
+
+TARGET_REF="refs/tags/upstream/${UPSTREAM_TAG}"
+TARGET_TAG_OBJECT="$(git rev-parse "$TARGET_REF")"
+TARGET_COMMIT="$(git rev-parse "${TARGET_REF}^{commit}")"
+git merge-base --is-ancestor "$OLD_BASE" "$TARGET_COMMIT"
 ```
 
-### 3. 迁移与兼容性审查
+把 `ls-remote` 返回的 tag object 和 peeled commit 记录到升级兼容性报告。若 upstream tag 未签名，不能伪称通过了签名验证；当前可执行的控制是记录远端 object/commit、保存本地 namespaced ref，并在 fork 端保护 release tag 不被移动。
 
-重点检查：
+同名 `refs/tags/upstream/*` 已存在但远端 object 变化时，fetch 应失败。不要加 `--force` 掩盖异常。
 
-- `backend/migrations/` 新增文件及是否为 forward-only；
-- `backend/go.mod`、`go.sum` 和 Go toolchain；
-- `frontend/pnpm-lock.yaml`；
-- OAuth、模型列表、计费和调度变更；
-- 代理处理、TLS/HTTP2、WebSocket 和 SSE；
-- 配置项新增、删除或默认值变化；
-- 现有本地 patch 是否与新实现重叠。
-
-数据库 migration 只能前进时，旧镜像回滚不一定安全。发布前必须明确“仅镜像回滚”是否成立；否则回滚方案必须包含数据库恢复点。
-
-### 4. 应用验证
-
-最低门槛：
+### 3. 建立 integration 并审查差异
 
 ```bash
-cd backend
-go test -tags=unit ./...
-go test -tags=integration ./...
-golangci-lint run ./...
+VERSION="${UPSTREAM_TAG#v}"
+INTEGRATION="integration/v${VERSION}-frenzy.${RELEASE_NO}"
+git switch --create "$INTEGRATION" "$TARGET_COMMIT"
 
-cd ../frontend
-pnpm install --frozen-lockfile
-pnpm run lint:check
-pnpm run typecheck
-pnpm run test:run
-pnpm run build
+git diff --stat "$OLD_BASE..$TARGET_COMMIT"
+git diff --name-status "$OLD_BASE..$TARGET_COMMIT" -- \
+  backend/migrations backend/go.mod backend/go.sum \
+  frontend/package.json frontend/pnpm-lock.yaml deploy
 ```
 
-另需执行与本地补丁和生产链路相关的定向测试：
+复制 [`UPGRADE_COMPATIBILITY_TEMPLATE.md`](UPGRADE_COMPATIBILITY_TEMPLATE.md) 形成这次升级的兼容性记录。至少审查：
 
-- HTTPS-only proxy probe；
-- offline pricing；
-- Anthropic Setup Token 账号测试；
-- 三个 OpenAI OAuth 账号测试；
-- API Key → 分组 → 调度 → 固定代理的 E2E；
-- 数据库迁移副本验证。
+- SQL migration、锁表、backfill、N/N-1 兼容和数据库回滚类别；
+- 配置新增、删除、默认值、secret 与部署模板；
+- API、OAuth、账号 credential、模型、计费、分组和调度语义；
+- Redis key/cache/payload 格式以及所有后台任务；
+- SSE、WebSocket、代理、TLS/HTTP2 和长连接行为；
+- Go/Node 工具链、lockfile 和生成代码。
 
-### 5. 安全与供应链
+### 4. 逐项处置 patch queue
 
-- 使用 fork CI；不能把“没有 check”当作通过。
-- 执行 `govulncheck`、`gosec`、依赖审计和容器扫描。
-- 构建上下文必须来自 clean、已提交的 revision。
-- 镜像必须为 `linux/amd64`、不可变 tag，并记录 digest。
+对 [`PATCH_QUEUE.md`](PATCH_QUEUE.md) 中每个稳定 Patch ID 选择一个结论：
 
-### 6. 发布边界
+- `drop-upstreamed`
+- `reimplement`
+- `cherry-pick`
+- `contribute`
+- `retire`
 
-应用仓库负责产生：
+每项都要记录目标 commit、理由、drop condition 和测试。没有完整处置表时不能形成 candidate。
 
-- fork release commit/tag；
-- 测试和扫描证据；
-- 可复现应用镜像。
+遇到冲突时：
 
-私有 ops 仓库负责：
+1. 记录冲突路径与相关 upstream commit；
+2. `git cherry-pick --abort`；
+3. 按目标版本接口重新实现语义；
+4. 在新 commit trailer 中写 `Frenzy-Patch-ID: FZ-xxx`；
+5. 用定向测试和 `git range-diff` 证明行为，而不是在冲突界面随意拼接。
 
-- 把镜像推入私有 ECR；
-- Terraform/SSM 激活明确 tag；
-- rollout、smoke 和回滚；
-- 写入 release manifest：upstream base、fork revision、image digest、config revision、验证结果。
+lockfile 必须通过对应包管理器重生成；Ent/Wire 等生成文件必须通过生成器重生成，禁止手工修改生成结果。
 
-发布顺序和生产限制见私有 `infra/docs/RELEASE_RUNBOOK.md`。
+比较旧、新 patch queue 时只使用已部署应用 tag，不使用当前分支 `HEAD`：
 
-## Fork CI 与保护策略
+```bash
+git range-diff \
+  "$OLD_BASE..$DEPLOYED_APP_TAG" \
+  "$TARGET_COMMIT..HEAD"
+```
 
-至少应配置：
+### 5. 验证 candidate
 
-- fork 的 backend、frontend、lint 和 security workflow 可运行；
-- `main` 和 release 分支禁止 force push；
-- 合并需要 CI checks；
-- production tag 不允许覆盖；
-- 私有 ops `main` 也需要 Terraform fmt/validate/test 和 secret scan。
+最低 release gate：
 
-上游 `release.yml` 会针对 `v*` tag 执行上游发布逻辑，甚至可能写回默认分支，不应原样用于 fork 的 `frenzy/*` 发布。fork 应使用独立、只构建不反写源码的 release workflow。
+```bash
+(cd backend && go test -tags=unit ./...)
+(cd backend && go test -tags=integration ./...)
+(cd backend && golangci-lint run ./...)
 
-## 回滚原则
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend run lint:check
+pnpm --dir frontend run typecheck
+pnpm --dir frontend run test:run
+pnpm --dir frontend run build
+```
 
-- 保留至少前两个已验证应用镜像 digest。
-- 没有 schema 变化且兼容时，可回滚镜像并复跑 smoke。
-- 有不兼容 migration 时，停止写流量，恢复发布前数据库快照/PITR，再恢复旧镜像。
-- 回滚后也要产生新的 ops 记录，不能静默修改 SSM 参数或复用旧 manifest。
+还必须完成：
 
-## 维护节奏
+- `govulncheck`、前端依赖审计和容器扫描；扫描结论绑定具体 commit/digest；
+- 所有保留 patch 的定向测试；
+- migration 副本演练；
+- `linux/amd64` 镜像构建；
+- API Key → 分组 → 调度 → 固定代理，以及低成本 Claude/OpenAI synthetic；
+- [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) 的兼容性结论。
 
-- 每周：fetch upstream、审查新 release/security 变更，不自动部署。
-- 每次 release：重新计算 ahead/behind 和 patch queue，不沿用旧数字。
-- 每月：验证恢复流程、旧镜像可用性、依赖扫描和 fork branch protection。
-- 每季度：检查本地补丁是否可删除或贡献 upstream。
+GitHub checks 为零、workflow 未运行或例外已过期都不算通过。当前 fork CI 与治理实况见 [`GITHUB_GOVERNANCE.md`](GITHUB_GOVERNANCE.md)。
+
+### 6. PR、固定 SHA 与 promotion
+
+```bash
+git push --set-upstream origin "$INTEGRATION"
+gh pr create --base main --head "$INTEGRATION" --fill
+```
+
+PR review 和 required checks 完成后，先记录 PR head 的不可变 `CANDIDATE_SHA`。release tag 保持目标 upstream + Frenzy patch 的线性历史，不依赖可移动分支名：
+
+```bash
+CANDIDATE_SHA='<approved-full-sha>'
+RELEASE_BRANCH="release/v${VERSION}-frenzy.${RELEASE_NO}"
+APP_TAG="frenzy/app/v${VERSION}-frenzy.${RELEASE_NO}"
+
+test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+test -z "$(git status --porcelain)"
+git branch "$RELEASE_BRANCH" "$CANDIDATE_SHA"
+git tag -a "$APP_TAG" "$CANDIDATE_SHA" -m "Frenzy application release $APP_TAG"
+git push origin "refs/heads/${RELEASE_BRANCH}:refs/heads/${RELEASE_BRANCH}"
+git push origin "refs/tags/${APP_TAG}:refs/tags/${APP_TAG}"
+
+git ls-remote origin \
+  "refs/heads/${RELEASE_BRANCH}" \
+  "refs/tags/${APP_TAG}" \
+  "refs/tags/${APP_TAG}^{}"
+```
+
+远端 branch SHA、tag object 和 peeled commit 必须与本地记录一致。release/tag 创建后，不再向 release 分支追加文档；维护文档通过 PR 进入 `main`，避免 branch HEAD 被误当成部署源码。
+
+tag 回读一致后，将已批准 PR 以 merge commit 合入 `main`，使默认分支得到最新维护状态并保留 release commit 的祖先关系；不要 squash/rebase 掉稳定 Patch ID 的实现历史。`main` 的 merge commit 不是应用部署引用，生产仍只认上面的 app tag。若 merge 解决过程改变了 candidate tree，停止并把变化作为新的 candidate 重新测试，不能让 main 和 release 静默分叉。
+
+### 7. 交给私有 ops 发布
+
+应用仓库只交付：
+
+- upstream tag object/peeled commit；
+- upstream base、candidate SHA、release branch、annotated app tag；
+- Patch ID 处置表；
+- 测试、安全扫描、migration/回滚兼容结论；
+- clean `linux/amd64` 镜像构建输入。
+
+私有 ops 仓库负责 ECR digest、SSM/Terraform 激活、rollout、smoke、观察和 release manifest。upstream 同步完成本身不授权生产写操作。
+
+## 停止条件
+
+出现任一情况必须停止 promotion 或部署：
+
+- 已部署 tag/完整 SHA/镜像 digest/ops revision 无法闭环；
+- upstream remote 可 push，或目标 tag object 与先前记录不一致；
+- 目标 tag 不是旧 upstream base 的后代；
+- patch queue 有未处置项目；
+- migration 或配置变更没有 N/N-1 与回滚结论；
+- 测试、扫描、amd64 build 或生产链路 synthetic 缺失；
+- candidate 工作区不 clean，或构建输入不是 candidate SHA；
+- release/tag 远端回读不一致。
+
+## 节奏
+
+- 每周：只读 fetch heads，检查正式 release/security 变化，不自动集成或部署。
+- 每次 upstream release：更新 [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md)，建立独立 compatibility report。
+- 每个 candidate：重新计算 patch queue，不沿用上次结论。
+- 每季度：审查本地 patch 是否可以贡献、删除或改成配置，并核对 GitHub 治理状态。
