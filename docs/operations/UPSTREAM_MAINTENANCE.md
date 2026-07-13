@@ -16,12 +16,13 @@ origin    https://github.com/LehengChen/sub2api fork
 - 当前部署分支：`release/e316ebf5-frenzy.1`
 - upstream base：`e316ebf5`，对应 v0.1.151 时期
 - fork release tag：`frenzy/app/v0.1.151-e316ebf5.1`
-- 当前 release 在 base 上有 3 个本地提交
+- 已部署源码 tag 在 base 上有 3 个本地代码提交
 - upstream 最新正式 tag：`v0.1.153`
 - `upstream/main`：`7d239d62`，比 v0.1.153 再前进 5 个提交
-- 当前 release 相对 `upstream/main`：本地 3 个、上游 85 个提交
+- 已部署源码 revision 相对 `upstream/main`：本地 3 个、上游 85 个提交
+- release 分支在已部署 revision 之后还有运维文档提交；这些提交没有进入当前运行镜像
 
-这只是观察快照。开始升级前必须重新 fetch 和计算。
+这只是观察快照。开始升级前必须重新 fetch，并分别计算“已部署源码 tag”和“目标集成分支”的差距；不能把后续纯文档提交误认为已部署应用代码。
 
 ## 当前本地 patch queue
 
