@@ -6,7 +6,16 @@ from datetime import date
 
 
 HIGH_SEVERITIES = {"high", "critical"}
-REQUIRED_FIELDS = {"package", "advisory", "severity", "mitigation", "expires_on"}
+REQUIRED_FIELDS = {
+    "package",
+    "advisory",
+    "severity",
+    "reason",
+    "mitigation",
+    "expires_on",
+    "owner",
+}
+PLACEHOLDER_OWNERS = {"security@your-domain", "owner@your-domain", "todo", "tbd"}
 
 
 def split_kv(line: str) -> tuple[str, str]:
@@ -153,6 +162,7 @@ def main() -> int:
     exception_index = {}
     errors = []
 
+    today = date.today()
     for exc in exceptions:
         missing = [field for field in REQUIRED_FIELDS if not exc.get(field)]
         if missing:
@@ -167,6 +177,19 @@ def main() -> int:
         if exc_date is None:
             errors.append(
                 f"Exception has invalid expires_on date: {exc.get('package', '<unknown>')}"
+            )
+            continue
+        owner = exc.get("owner", "").strip().lower()
+        if owner in PLACEHOLDER_OWNERS or "your-domain" in owner:
+            errors.append(
+                f"Exception has placeholder owner: {exc.get('package', '<unknown>')}"
+            )
+            continue
+        if exc_date < today:
+            errors.append(
+                "Exception expired: "
+                f"{exc.get('package', '<unknown>')} ({exc.get('advisory', '<unknown>')}) "
+                f"expired on {exc_date.isoformat()}"
             )
             continue
         if not exc_package or not exc_advisory:
@@ -184,7 +207,6 @@ def main() -> int:
             "expires_on": exc_date,
         }
 
-    today = date.today()
     missing_exceptions = []
     expired_exceptions = []
 
