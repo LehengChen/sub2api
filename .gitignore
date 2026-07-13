@@ -145,6 +145,10 @@ frontend/coverage/
 aicodex
 output/
 
+# Local validation artifacts
+__pycache__/
+*.py[cod]
+
 # The private operations repository is checked out here as an independent Git
 # repository. Never stage it into the public application fork.
 /infra/
