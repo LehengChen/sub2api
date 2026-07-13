@@ -126,7 +126,6 @@ scripts
 .code-review-state
 #openspec/
 code-reviews/
-AGENTS.md
 backend/cmd/server/server
 deploy/docker-compose.override.yml
 .gocache/
@@ -138,8 +137,32 @@ docs/*
 !docs/ASYNC_IMAGE_TASKS.md
 !docs/legal/
 !docs/legal/*.md
+!docs/operations/
+!docs/operations/*.md
 .serena/
 .codex/
 frontend/coverage/
 aicodex
 output/
+
+# The private operations repository is checked out here as an independent Git
+# repository. Never stage it into the public application fork.
+/infra/
+
+# ===================
+# Terraform / AWS deployment local state and secrets
+# ===================
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+*backend.hcl
+!backend.hcl.example
+infra/aws/bootstrap/backend.tf
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
