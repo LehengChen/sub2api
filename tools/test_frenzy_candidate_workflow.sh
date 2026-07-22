@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WORKFLOW="$ROOT_DIR/.github/workflows/frenzy-candidate.yml"
+OCI_VERIFIER="$ROOT_DIR/tools/verify_oci_platform.py"
+OCI_VERIFIER_TEST="$ROOT_DIR/tools/test_verify_oci_platform.py"
 
 fail() {
   printf 'frenzy candidate workflow test failed: %s\n' "$1" >&2
@@ -10,6 +12,10 @@ fail() {
 }
 
 test -f "$WORKFLOW" || fail "workflow is missing"
+test -f "$OCI_VERIFIER" || fail "OCI platform verifier is missing"
+test -f "$OCI_VERIFIER_TEST" || fail "OCI platform verifier test is missing"
+
+python3 "$OCI_VERIFIER_TEST"
 
 python3 - "$WORKFLOW" <<'PY'
 from pathlib import Path
@@ -66,6 +72,7 @@ for command, description in (
     (r"go test -tags=unit", "backend unit tests"),
     (r"go test -tags=integration", "integration harness"),
     (r"go test -race -tags=unit", "targeted race gate"),
+    (r"go test -race -tags=unit[^\n]*-run 'Test\(ProvideOAuthSessionStore[^\n]*' \.\/internal\/repository", "shared-state repository race coverage"),
     (r"go generate ./ent", "Ent generation"),
     (r"go generate ./cmd/server", "Wire generation"),
     (r"pnpm run lint:check", "frontend lint"),
@@ -84,6 +91,7 @@ for command, description in (
 for pattern, description in (
     (r"platforms:\s+linux/amd64", "linux/amd64 build"),
     (r"outputs:\s+type=oci,dest=", "OCI output"),
+    (r"verify_oci_platform\.py\s+\\\s*\n\s*/tmp/sub2api-frenzy-candidate\.oci\.tar --platform linux/amd64", "recursive OCI platform verification"),
     (r"provenance:\s+mode=max", "Buildx provenance"),
     (r"sbom:\s+true", "Buildx SBOM"),
     (r"aquasecurity/trivy-action@v0\.36\.0", "pinned Trivy image scan"),
@@ -94,6 +102,8 @@ for pattern, description in (
     (r"actions/upload-artifact@", "non-production artifact upload"),
 ):
     require(pattern, description)
+
+forbid(r"\.manifests\[\].*\.platform\.os", "shallow top-level OCI platform selection")
 
 print("frenzy candidate workflow policy checks passed")
 PY
