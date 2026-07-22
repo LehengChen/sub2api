@@ -1093,6 +1093,11 @@ rate_limit:
 # 定价数据源（可选）
 # =============================================================================
 pricing:
+  # Allow background downloads from the remote pricing source (default: true)
+  # 是否允许后台从远程价格源下载更新（默认：true）
+  # Set to false for isolated/offline deployments; the local cache or fallback file is used.
+  # 隔离或离线部署可设为 false，此时仅使用本地缓存或备用文件。
+  remote_updates_enabled: true
   # URL to fetch model pricing data (default: pinned model-price-repo commit)
   # 获取模型定价数据的 URL（默认：固定 commit 的 model-price-repo）
   remote_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/refs/heads/main//model_prices_and_context_window.json"
