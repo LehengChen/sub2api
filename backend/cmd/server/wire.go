@@ -26,6 +26,7 @@ import (
 
 type Application struct {
 	Server      *http.Server
+	Health      *server.HealthService
 	PromptAudit *securityaudit.PromptService
 	Cleanup     func()
 }
@@ -56,7 +57,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "Cleanup"),
+		wire.Struct(new(Application), "Server", "Health", "PromptAudit", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -67,8 +68,9 @@ func providePrivacyClientFactory() service.PrivacyClientFactory {
 
 func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {
 	return service.BuildInfo{
-		Version:   buildInfo.Version,
-		BuildType: buildInfo.BuildType,
+		Version:           buildInfo.Version,
+		BuildType:         buildInfo.BuildType,
+		DeploymentControl: buildInfo.DeploymentControl,
 	}
 }
 
