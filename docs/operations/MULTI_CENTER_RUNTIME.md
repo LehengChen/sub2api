@@ -38,8 +38,8 @@ Migrator 不启动 HTTP、OAuth refresh、scheduler、清理任务或其他 work
 
 ```text
 SUB2API_WORKER_LEASE_KEY=sub2api:runtime:primary-worker
-SUB2API_WORKER_LEASE_TTL_SECONDS=30
-SUB2API_WORKER_LEASE_RENEW_SECONDS=10
+SUB2API_WORKER_LEASE_TTL_SECONDS=60
+SUB2API_WORKER_LEASE_RENEW_SECONDS=15
 ```
 
 续租失败、lease 被替换或 Redis 不可达时，进程立即变为 not-ready，并进入有限排空与清理。清理期间继续保有 lease，正常停止最后才释放。

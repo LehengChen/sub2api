@@ -4,6 +4,12 @@
 
 ## 2026-07-13 只读观察
 
+> 2026-07-22（Asia/Tokyo）补充：精确目标 `v0.1.163` tag object 为
+> `bb752ef7776dc126ffca5df9188087d0d0aed559`，peeled commit 为
+> `d0bdd7e771636a8d315f542cafd39484f39bd60c`。已从该 tag 创建
+> `integration/v0.1.163-frenzy.1`；tag 未签名，candidate 尚未批准、构建或部署。
+> 兼容性和门禁见 [`UPGRADE_V0.1.163.md`](UPGRADE_V0.1.163.md)。下表继续保留已部署基线事实。
+
 | 项目 | 值 |
 |---|---|
 | deployed application tag | `frenzy/app/v0.1.151-e316ebf5.1` |

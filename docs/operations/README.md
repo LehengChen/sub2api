@@ -13,9 +13,12 @@
 | [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md) | 当前 deployed/upstream 差距的带日期快照 |
 | [`PATCH_QUEUE.md`](PATCH_QUEUE.md) | Frenzy runtime patch 的稳定 ID、行为不变量和删除条件 |
 | [`UPGRADE_COMPATIBILITY_TEMPLATE.md`](UPGRADE_COMPATIBILITY_TEMPLATE.md) | 每次 upstream 升级的 migration/config/回滚审查模板 |
+| [`UPGRADE_V0.1.163.md`](UPGRADE_V0.1.163.md) | 从已部署 v0.1.151 基线到 v0.1.163 candidate 的精确兼容性审查 |
 | [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) | readiness、drain、N/N-1、migration 和多副本应用契约 |
+| [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md) | 进程角色、migration-only、worker lease、冷备 readiness 与人工切换契约 |
 | [`HEALTH_AND_DRAIN.md`](HEALTH_AND_DRAIN.md) | 应用 `/livez`、`/readyz`、SIGTERM 排空和长连接注册契约 |
 | [`EXTERNAL_RELEASE_CONTROL.md`](EXTERNAL_RELEASE_CONTROL.md) | 外部运维控制、只读 release catalog、版本 API capability 与 fail-closed 契约 |
+| [`FRENZY_CANDIDATE_CI.md`](FRENZY_CANDIDATE_CI.md) | Frenzy 候选构建触发边界、完整测试 gate、OCI evidence 与 digest/签名缺口 |
 | [`GITHUB_GOVERNANCE.md`](GITHUB_GOVERNANCE.md) | fork CI、分支/tag 保护的期望与实际状态 |
 | [`../../DEV_GUIDE.md`](../../DEV_GUIDE.md) | 本地开发示例；Git/upstream 和生产规则不在该文件定义 |
 
