@@ -45,6 +45,14 @@ server:
   trusted_proxies:
     - 127.0.0.1/32
     - ::1/128
+  # Total timeout for PostgreSQL, Redis, and migration readiness checks (seconds)
+  # PostgreSQL、Redis 与迁移就绪检查共用的总超时（秒）
+  readiness_timeout_seconds: 2
+  # Maximum time to drain active HTTP/SSE/WebSocket requests after SIGTERM (seconds)
+  # SIGTERM 后等待现有 HTTP/SSE/WebSocket 请求排空的最大时间（秒）
+  # Keep this aligned with the load balancer, container, and service-manager timeouts.
+  # 应与负载均衡器、容器和服务管理器的超时保持一致。
+  shutdown_timeout_seconds: 30
   # Global max request body size in bytes (default: 256MB)
   # 全局最大请求体大小（字节，默认 256MB）
   # Applies to all requests, especially important for h2c first request memory protection

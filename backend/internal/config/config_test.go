@@ -266,6 +266,15 @@ func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultServerLifecycleTimeouts(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 2, cfg.Server.ReadinessTimeoutSeconds)
+	require.Equal(t, 30, cfg.Server.ShutdownTimeoutSeconds)
+}
+
 func TestNormalizeRunMode(t *testing.T) {
 	tests := []struct {
 		input    string

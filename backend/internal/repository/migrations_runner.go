@@ -103,6 +103,78 @@ func ApplyMigrations(ctx context.Context, db *sql.DB) error {
 	return applyMigrationsFS(ctx, db, migrations.FS)
 }
 
+// CheckMigrations verifies that every migration embedded in this binary is
+// present in the database with an accepted checksum. It is read-only and does
+// not acquire the migration advisory lock, create tables, or apply migrations,
+// so it is safe to use from a readiness probe.
+//
+// Additional database migrations are intentionally tolerated. During an N/N-1
+// rolling window, the older binary must remain ready after a compatible expand
+// migration from the newer release has been applied.
+func CheckMigrations(ctx context.Context, db *sql.DB) error {
+	return checkMigrationsFS(ctx, db, migrations.FS)
+}
+
+func checkMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
+	if db == nil {
+		return errors.New("nil sql db")
+	}
+
+	files, err := fs.Glob(fsys, "*.sql")
+	if err != nil {
+		return fmt.Errorf("list migrations: %w", err)
+	}
+	sort.Strings(files)
+
+	expected := make(map[string]string, len(files))
+	for _, name := range files {
+		contentBytes, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+		content := strings.TrimSpace(string(contentBytes))
+		if content == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(content))
+		expected[name] = hex.EncodeToString(sum[:])
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT filename, checksum FROM schema_migrations")
+	if err != nil {
+		return fmt.Errorf("read schema_migrations: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[string]string, len(expected))
+	for rows.Next() {
+		var name, checksum string
+		if err := rows.Scan(&name, &checksum); err != nil {
+			return fmt.Errorf("scan schema_migrations: %w", err)
+		}
+		applied[name] = checksum
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate schema_migrations: %w", err)
+	}
+
+	for _, name := range files {
+		checksum, ok := expected[name]
+		if !ok {
+			continue
+		}
+		actual, ok := applied[name]
+		if !ok {
+			return fmt.Errorf("migration %s is not applied", name)
+		}
+		if actual != checksum && !isMigrationChecksumCompatible(name, actual, checksum) {
+			return fmt.Errorf("migration %s checksum mismatch", name)
+		}
+	}
+
+	return nil
+}
+
 // applyMigrationsFS 是迁移执行的核心实现。
 // 它从指定的文件系统读取 SQL 迁移文件并按顺序应用。
 //

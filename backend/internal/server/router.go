@@ -34,6 +34,7 @@ func SetupRouter(
 	settingService *service.SettingService,
 	cfg *config.Config,
 	redisClient *redis.Client,
+	healthService *HealthService,
 ) *gin.Engine {
 	middleware2.SetIngressRejectRecorder(opsService)
 	// 缓存 iframe 页面的 origin 列表，用于动态注入 CSP frame-src
@@ -54,6 +55,8 @@ func SetupRouter(
 	refreshFrameOrigins() // 启动时初始化
 
 	// 应用中间件
+	r.Use(healthService.DrainGuard())
+	r.Use(healthService.TrackRequests())
 	r.Use(middleware2.RequestLogger())
 	// 将客户端 IP + UA 注入 request context，供 token 签发/会话绑定/审计日志统一读取。
 	// 解析模式按请求快照：兼容开关开启时信任原始转发头，关闭时使用 server.trusted_proxies。
@@ -88,7 +91,7 @@ func SetupRouter(
 	}
 
 	// 注册路由
-	registerRoutes(r, handlers, jwtAuth, adminAuth, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, cfg, redisClient)
+	registerRoutes(r, handlers, jwtAuth, adminAuth, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, cfg, redisClient, healthService)
 
 	return r
 }
@@ -108,9 +111,10 @@ func registerRoutes(
 	settingService *service.SettingService,
 	cfg *config.Config,
 	redisClient *redis.Client,
+	healthService *HealthService,
 ) {
 	// 通用路由（健康检查、状态等）
-	routes.RegisterCommonRoutes(r)
+	routes.RegisterCommonRoutes(r, healthService.LivenessHandler, healthService.ReadinessHandler)
 
 	// API v1
 	v1 := r.Group("/api/v1")
