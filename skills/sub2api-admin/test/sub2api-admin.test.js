@@ -58,6 +58,8 @@ test("proxies all emits only allowlisted fields and credential presence", async 
       password: "synthetic-password",
       status: "active",
       account_count: 0,
+      latency_message: "must-not-leak-latency",
+      quality_summary: "must-not-leak-quality",
       unexpected: "must-not-pass",
     }]);
   }, async (baseURL) => {
@@ -79,6 +81,8 @@ test("proxies all emits only allowlisted fields and credential presence", async 
     assert.equal(result.stdout.includes("synthetic-user"), false);
     assert.equal(result.stdout.includes("synthetic-password"), false);
     assert.equal(result.stdout.includes("unexpected"), false);
+    assert.equal(result.stdout.includes("must-not-leak-latency"), false);
+    assert.equal(result.stdout.includes("must-not-leak-quality"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(output[0], "username"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(output[0], "password"), false);
   });
@@ -170,12 +174,13 @@ test("raw api sends an optional idempotency header unchanged", async () => {
 
 test("proxy lookup, test, accounts, and delete use their documented routes", async () => {
   const routes = [];
+  const outputs = [];
   await withServer((req, res) => {
     routes.push(`${req.method} ${req.url}`);
     if (req.url.endsWith("/test")) {
-      jsonResponse(res, { success: true, latency_ms: 8, ip_address: "192.0.2.4" });
+      jsonResponse(res, { success: true, message: "must-not-leak-test", latency_ms: 8, ip_address: "192.0.2.4" });
     } else if (req.url.endsWith("/accounts")) {
-      jsonResponse(res, [{ id: 9, name: "account-9", platform: "openai", type: "oauth" }]);
+      jsonResponse(res, [{ id: 9, name: "account-9", platform: "openai", type: "oauth", notes: "must-not-leak-note" }]);
     } else if (req.method === "DELETE") {
       jsonResponse(res, { message: "Proxy deleted successfully" });
     } else {
@@ -198,6 +203,7 @@ test("proxy lookup, test, accounts, and delete use their documented routes", asy
     ]) {
       const result = await runCli(baseURL, args);
       assert.equal(result.code, 0, result.stderr);
+      outputs.push(JSON.parse(result.stdout));
     }
   });
   assert.deepEqual(routes, [
@@ -206,4 +212,7 @@ test("proxy lookup, test, accounts, and delete use their documented routes", asy
     "GET /api/v1/admin/proxies/4/accounts",
     "DELETE /api/v1/admin/proxies/4",
   ]);
+  const serialized = JSON.stringify(outputs);
+  assert.equal(serialized.includes("must-not-leak-test"), false);
+  assert.equal(serialized.includes("must-not-leak-note"), false);
 });
