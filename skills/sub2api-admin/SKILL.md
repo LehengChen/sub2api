@@ -21,7 +21,7 @@ For all commands and payload examples, read [references/admin-cli.md](references
 
 1. Reuse `SUB2API_BASE_URL` and either `SUB2API_ADMIN_API_KEY` or `SUB2API_JWT` from the environment.
 2. Run read-only commands first: `accounts list`, `accounts get <id>`, `groups all`, or `proxies all`.
-3. Before destructive or bulk writes, print the target account names and IDs.
+3. Before destructive or bulk writes, print the target account names and IDs. For a proxy delete, run `proxies get <id>` and `proxies accounts <id>` first.
 4. Execute the write command only after the target set is clear.
 5. Run a follow-up read command to verify the result.
 
@@ -33,6 +33,9 @@ node scripts/sub2api-admin.js accounts get 40
 node scripts/sub2api-admin.js accounts usage 40
 node scripts/sub2api-admin.js accounts set-schedulable 40 true
 node scripts/sub2api-admin.js accounts bulk-update --ids 40,39 --json '{"concurrency":10}'
+node scripts/sub2api-admin.js proxies all
+node scripts/sub2api-admin.js proxies get 4
+node scripts/sub2api-admin.js proxies test 4
 node scripts/sub2api-admin.js redeem-codes list --page-size 20
 node scripts/sub2api-admin.js redeem-codes generate --json '{"count":1,"type":"balance","value":10}' --idempotency-key redeem-$(date +%s)
 node scripts/sub2api-admin.js redeem-codes create-and-redeem --json '{"code":"order_123","type":"balance","value":10,"user_id":123}' --idempotency-key order-123
@@ -45,5 +48,7 @@ node scripts/sub2api-admin.js tls-profiles list
 - Authentication uses `x-api-key` from `SUB2API_ADMIN_API_KEY` first, then falls back to `Authorization: Bearer <jwt>` from `SUB2API_JWT`.
 - If the API returns `INVALID_ADMIN_KEY`, ask the user to regenerate the admin API key. If using JWT, log in as an admin user and copy the `access_token` from `POST /api/v1/auth/login`.
 - `accounts export` includes credentials and tokens. Prefer `--file` and avoid printing exports in chat.
+- Proxy list, get, and create output is allowlisted and credential-safe: it never prints `username` or `password` values, and reports only `auth_present` and `password_present` booleans.
+- Proxy creation requires a caller-supplied, stable, non-empty `--idempotency-key`; the CLI refuses to send the request without it. Do not generate a new key when retrying the same operation.
 - Redeem code create/redeem commands should use `--idempotency-key` for payment or recharge workflows.
 - For uncertain or newly added backend APIs, use `api <METHOD> <admin-path>` after a read-only check.

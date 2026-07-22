@@ -23,6 +23,8 @@ curl -sS "$SUB2API_BASE_URL/api/v1/auth/login" \
 
 ```bash
 node scripts/sub2api-admin.js <command>
+# 本地 CLI 回归测试（不连接任何后台）
+node --test test/sub2api-admin.test.js
 ```
 
 ## Accounts
@@ -125,7 +127,41 @@ node scripts/sub2api-admin.js accounts import-json \
 ```bash
 node scripts/sub2api-admin.js groups all
 node scripts/sub2api-admin.js proxies all
+node scripts/sub2api-admin.js proxies get 4
+node scripts/sub2api-admin.js proxies test 4
+node scripts/sub2api-admin.js proxies accounts 4
 ```
+
+Proxy command output is intentionally allowlisted. It includes identity, endpoint,
+status, health, and account-count fields, but never prints `username` or `password`
+values. Instead it includes the boolean fields `auth_present` and
+`password_present`. This remains true for `proxies all`, `get`, and `create` even
+when the server returns credential fields.
+
+Create a proxy with a file or inline JSON. A stable, non-empty idempotency key is
+mandatory and is sent exactly as the `Idempotency-Key` request header. Reuse the
+same key when retrying the same logical operation; do not generate a new key for
+an uncertain response.
+
+```bash
+node scripts/sub2api-admin.js proxies create \
+  --file proxy-egress-04.json \
+  --idempotency-key proxy-egress-04-20260722
+node scripts/sub2api-admin.js proxies create \
+  --json '{"name":"egress-05","protocol":"socks5h","host":"10.0.1.11","port":1080,"fallback_mode":"none"}' \
+  --idempotency-key proxy-egress-05-20260722
+```
+
+Before deleting an exit, inspect its details and account associations. The
+backend rejects deletion while accounts remain bound:
+
+```bash
+node scripts/sub2api-admin.js proxies accounts 4
+node scripts/sub2api-admin.js proxies delete 4
+```
+
+`proxies test <id>` performs a live connectivity probe and may reach an external
+target. Run it only during an approved validation window.
 
 ## Redeem Codes
 
@@ -205,7 +241,15 @@ node scripts/sub2api-admin.js tls-profiles delete 1
 node scripts/sub2api-admin.js api GET /admin/groups/all
 node scripts/sub2api-admin.js api POST /admin/accounts/bulk-update \
   --json '{"account_ids":[40],"concurrency":10}'
+node scripts/sub2api-admin.js api POST /admin/proxies \
+  --json '{"name":"example","protocol":"socks5h","host":"10.0.1.11","port":1080}' \
+  --idempotency-key proxy-example-20260722
 ```
+
+The raw `api` command accepts an optional `--idempotency-key`. When supplied,
+the value is sent unchanged as `Idempotency-Key`; malformed, empty, non-ASCII,
+or multi-line values are rejected locally. Raw responses are not proxy-redacted,
+so use the typed `proxies` commands whenever an endpoint is available.
 
 ## Confirmed Admin Endpoints
 
@@ -244,6 +288,11 @@ node scripts/sub2api-admin.js api POST /admin/accounts/bulk-update \
 - `GET /api/v1/admin/accounts/antigravity/default-model-mapping`
 - `GET /api/v1/admin/groups/all`
 - `GET /api/v1/admin/proxies/all`
+- `GET /api/v1/admin/proxies/:id`
+- `POST /api/v1/admin/proxies`
+- `POST /api/v1/admin/proxies/:id/test`
+- `GET /api/v1/admin/proxies/:id/accounts`
+- `DELETE /api/v1/admin/proxies/:id`
 - `GET /api/v1/admin/redeem-codes`
 - `GET /api/v1/admin/redeem-codes/export`
 - `GET /api/v1/admin/redeem-codes/stats`
