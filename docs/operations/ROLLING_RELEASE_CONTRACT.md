@@ -4,6 +4,13 @@
 
 ## 当前事实
 
+截至 2026-07-22（Asia/Tokyo），应用源码已加入 `/livez`、真实 `/readyz`、可配置
+readiness/shutdown timeout，以及 SIGTERM 先标记 not-ready 再进行有限排空的生命周期
+实现。该源码变更尚未自动证明已经部署到生产；生产事实仍须从私有 release manifest
+和运行工件核对。普通 HTTP/SSE 会由应用排空计数和 `http.Server.Shutdown` 管理；
+hijacked WebSocket 只有在 handler 使用长连接 registry 后才会纳入排空等待，当前不能
+据此宣称所有 WebSocket 已经无中断。
+
 截至 2026-07-13，当前部署版本存在以下边界：
 
 - `/health` 固定返回 200，只证明 HTTP 进程可以响应，不检查 PostgreSQL、Redis、migration 或账号调度。
