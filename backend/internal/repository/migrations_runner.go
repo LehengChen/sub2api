@@ -146,7 +146,7 @@ func checkMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	if err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	applied := make(map[string]string, len(expected))
 	for rows.Next() {
