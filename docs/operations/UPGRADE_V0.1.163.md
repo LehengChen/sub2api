@@ -1,19 +1,33 @@
 # Upgrade Compatibility: v0.1.163
 
-观察时间：2026-07-22（Asia/Tokyo）
+观察时间：2026-07-23（Asia/Tokyo）
 
 状态：`integration candidate`，未批准、未构建生产镜像、未部署。
 
 ## Candidate Verification Snapshot
 
-截至 2026-07-22（Asia/Tokyo），本工作区已完成以下只读候选验证：Go unit（含
-`-tags=unit ./...`）、定向 race（runtime/server 全包及 WorkerFence/OAuth session
-测试）、Ent/Wire 二次生成洁净检查、`govulncheck@v1.1.4`、`linux/amd64` 编译、前端
-lint/typecheck/Vitest/build、pnpm audit 现有例外门禁、workflow policy、Terraform
-validate/test（私有 ops 27/27）和新增 shell/controller 测试。集成测试在本机因
-Docker socket 权限拒绝而未完成；候选 CI 必须在带 PostgreSQL/Redis service 的 runner
-上重跑并拒绝任何关键测试 `skip`。本机没有可用 Docker daemon，因此没有伪造镜像
-构建或 Trivy 结果；生产 ECR digest、provenance、签名和 catalog 仍是后续批准门禁。
+截至 2026-07-23（Asia/Tokyo），本工作区已完成以下只读候选验证：Go unit（含
+`-tags=unit ./...`）、定向 race（runtime/server 全包、service 契约及 repository Redis
+adapter）、Ent/Wire 二次生成洁净检查、`golangci-lint v2.9.0`、
+`govulncheck@v1.1.4`、`linux/amd64` 编译、前端 lint/typecheck/Vitest/build、pnpm audit
+现有例外门禁、workflow policy、Terraform validate/test（私有 ops 27/27）和新增
+shell/controller 测试。
+
+不可变候选 `frenzy/candidate/0.1.163-frenzy.1` 对应完整源码
+`713c4999354ab33bc01fc863ed9817cde96ea1d3`。远程 run
+[`29929198055`](https://github.com/LehengChen/sub2api/actions/runs/29929198055) 于
+2026-07-22 23:33:55 至 23:47:06（Asia/Tokyo）运行：gate、backend、frontend 和
+security 成功，其中 backend 使用真实 PostgreSQL/Redis service 完成 unit/integration、
+必需共享状态 no-skip gate、race 和 Ent/Wire clean generation；lint 与 image 失败。
+lint 暴露 service 直接导入 Redis 和迁移 readiness 的 `rows.Close` 未显式处理；image
+暴露带 provenance/SBOM 的 OCI 顶层 index 没有直接 platform descriptor，原 jq 校验
+错误地只检查第一层。对应修复为 `d4a8273d1`、`1f2935494` 和 `3bcb8a6b8`，并已用该
+失败 run 的真实 OCI archive 只读复验递归校验器。`.1` 保持失败且不可变；新的 `.2`
+在全部远程 job 成功前仍是待验证候选。
+
+本机没有可用 Docker daemon，因此没有本地伪造镜像构建或 Trivy 结果。`.1` 的 image
+job 在平台 evidence 步骤停止，不能视为容器扫描成功；生产 ECR digest、provenance、
+签名和 catalog 仍是后续批准门禁。
 
 ## 身份闭环
 
@@ -88,7 +102,8 @@ Docker socket 权限拒绝而未完成；候选 CI 必须在带 PostgreSQL/Redis
 | FZ-007 | `new` multi-center runtime | 显式角色、migration-only、worker lease 和冷 standby fail-closed |
 | FZ-008 | `new` redirect revalidation | redirect 每一跳重新执行 scheme/host/private-IP policy |
 
-最终 commit、stable patch-id 和测试证据在提交固定后回填 [`PATCH_QUEUE.md`](PATCH_QUEUE.md)。
+最终 commit、stable patch-id 和 `.1` 失败证据已回填
+[`PATCH_QUEUE.md`](PATCH_QUEUE.md)；`.2` 成功证据仍待远程运行。
 
 ## Required Evidence
 
