@@ -87,7 +87,7 @@ func TestRedisOAuthSessionStore_ProviderNamespaceAndTTL(t *testing.T) {
 func TestRedisOAuthSessionStore_CorruptPayloadIsConsumed(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := newTestRedisClient(t, server.Addr())
-	store, err := NewRedisOAuthSessionStore(client, "test:oauth")
+	store, err := NewRedisOAuthSessionStore(&testOAuthSessionBackend{client: client}, "test:oauth")
 	require.NoError(t, err)
 	ctx := context.Background()
 
@@ -190,9 +190,48 @@ func TestOpenAIOAuthService_RedisSessionCrossesInstances(t *testing.T) {
 
 func newTestRedisOAuthSessionStore(t *testing.T, address, prefix string) *RedisOAuthSessionStore {
 	t.Helper()
-	store, err := NewRedisOAuthSessionStore(newTestRedisClient(t, address), prefix)
+	store, err := NewRedisOAuthSessionStore(&testOAuthSessionBackend{client: newTestRedisClient(t, address)}, prefix)
 	require.NoError(t, err)
 	return store
+}
+
+var testConsumeOAuthSessionScript = redis.NewScript(`
+local payload = redis.call("GET", KEYS[1])
+if not payload then
+  return nil
+end
+redis.call("DEL", KEYS[1])
+return payload
+`)
+
+// testOAuthSessionBackend keeps the service package tests independent from
+// the repository package while still exercising Redis atomic consume semantics.
+type testOAuthSessionBackend struct {
+	client redis.UniversalClient
+}
+
+func (b *testOAuthSessionBackend) Set(ctx context.Context, key string, payload []byte, ttl time.Duration) error {
+	return b.client.Set(ctx, key, payload, ttl).Err()
+}
+
+func (b *testOAuthSessionBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	payload, err := b.client.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrOAuthSessionBackendNotFound
+	}
+	return payload, err
+}
+
+func (b *testOAuthSessionBackend) Consume(ctx context.Context, key string) ([]byte, error) {
+	payload, err := testConsumeOAuthSessionScript.Run(ctx, b.client, []string{key}).Text()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrOAuthSessionBackendNotFound
+	}
+	return []byte(payload), err
+}
+
+func (b *testOAuthSessionBackend) Delete(ctx context.Context, key string) error {
+	return b.client.Del(ctx, key).Err()
 }
 
 func newTestRedisClient(t *testing.T, address string) *redis.Client {

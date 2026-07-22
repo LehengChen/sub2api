@@ -54,7 +54,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	settingRepository := repository.NewSettingRepository(client)
 	groupRepository := repository.NewGroupRepository(client, db)
 	proxyRepository := repository.NewProxyRepository(client, db)
-	workerFence, err := service.ProvideWorkerFence(redisClient, control)
+	workerFence, err := repository.ProvideWorkerFence(redisClient, control)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	}
 	deferredService := service.ProvideDeferredService(accountRepository, timingWheelService, workerFence)
 	claudeOAuthClient := repository.NewClaudeOAuthClient()
-	oAuthSessionStore, err := service.ProvideOAuthSessionStore(redisClient)
+	oAuthSessionStore, err := repository.ProvideOAuthSessionStore(redisClient)
 	if err != nil {
 		return nil, err
 	}

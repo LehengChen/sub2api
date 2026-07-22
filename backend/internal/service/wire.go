@@ -61,13 +61,6 @@ func ProvideBatchImageCleanupService(repo BatchImageRepository, accountRepo Acco
 	return svc
 }
 
-// ProvideOAuthSessionStore keeps authorization state reachable from every API
-// instance. Redis errors fail OAuth closed; production must never silently fall
-// back to a process-local store in a multi-instance deployment.
-func ProvideOAuthSessionStore(redisClient *redis.Client) (OAuthSessionStore, error) {
-	return NewRedisOAuthSessionStore(redisClient, DefaultOAuthSessionKeyPrefix)
-}
-
 func ProvideOAuthService(
 	proxyRepo ProxyRepository,
 	oauthClient ClaudeOAuthClient,
@@ -745,7 +738,6 @@ func ProvideAPIKeyService(
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
-	ProvideWorkerFence,
 	NewAuthService,
 	NewUserService,
 	ProvideAPIKeyService,
@@ -773,7 +765,6 @@ var ProviderSet = wire.NewSet(
 	ProvideBatchImageCleanupService,
 	ProvideBatchImageWorkerRuntime,
 	wire.Bind(new(AccountRuntimeBlocker), new(*OpenAIGatewayService)),
-	ProvideOAuthSessionStore,
 	ProvideOAuthService,
 	ProvideOpenAIOAuthService,
 	ProvideGrokOAuthService,

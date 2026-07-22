@@ -10,34 +10,18 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
-	"github.com/redis/go-redis/v9"
 )
 
 var ErrWorkerFenceHeld = errors.New("singleton worker lease is already held")
 
-var acquireWorkerFenceScript = redis.NewScript(`
-if redis.call("EXISTS", KEYS[1]) == 1 then
-  return {0, 0}
-end
-local token = redis.call("INCR", KEYS[2])
-redis.call("SET", KEYS[1], ARGV[1] .. "|" .. token, "PX", ARGV[2])
-return {1, token}
-`)
-
-var renewWorkerFenceScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  redis.call("PEXPIRE", KEYS[1], ARGV[2])
-  return 1
-end
-return 0
-`)
-
-var releaseWorkerFenceScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
-`)
+// WorkerFenceBackend is the shared-state port for the single-active worker
+// lease. The repository layer owns the Redis scripts and translates their
+// result types into these stable service-level operations.
+type WorkerFenceBackend interface {
+	Acquire(ctx context.Context, leaseKey, epochKey, owner string, ttl time.Duration) (token int64, acquired bool, err error)
+	Renew(ctx context.Context, leaseKey, value string, ttl time.Duration) (bool, error)
+	Release(ctx context.Context, leaseKey, value string) error
+}
 
 // WorkerFence is a single-active worker lease. It prevents an accidental
 // second active/worker process from starting singleton jobs and exposes a
@@ -45,7 +29,7 @@ return 0
 // Automatic failover remains disabled until critical writes validate the token.
 type WorkerFence struct {
 	control runtimecontrol.Control
-	client  redis.UniversalClient
+	backend WorkerFenceBackend
 	value   string
 	token   uint64
 	enabled bool
@@ -57,17 +41,13 @@ type WorkerFence struct {
 	lostOne sync.Once
 }
 
-func ProvideWorkerFence(redisClient *redis.Client, control runtimecontrol.Control) (*WorkerFence, error) {
-	return NewWorkerFence(redisClient, control)
-}
-
-func NewWorkerFence(client redis.UniversalClient, control runtimecontrol.Control) (*WorkerFence, error) {
+func NewWorkerFence(backend WorkerFenceBackend, control runtimecontrol.Control) (*WorkerFence, error) {
 	if err := control.Validate(); err != nil {
 		return nil, err
 	}
 	fence := &WorkerFence{
 		control: control,
-		client:  client,
+		backend: backend,
 		enabled: control.RunsWorkers(),
 		lost:    make(chan struct{}),
 		done:    make(chan struct{}),
@@ -77,26 +57,25 @@ func NewWorkerFence(client redis.UniversalClient, control runtimecontrol.Control
 		close(fence.done)
 		return fence, nil
 	}
-	if client == nil {
-		return nil, errors.New("worker fence Redis client is required")
+	if backend == nil {
+		return nil, errors.New("worker fence backend is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), control.WorkerRenewInterval)
 	defer cancel()
-	result, err := acquireWorkerFenceScript.Run(
+	token, acquired, err := backend.Acquire(
 		ctx,
-		client,
-		[]string{control.WorkerLeaseKey, control.WorkerLeaseKey + ":epoch"},
+		control.WorkerLeaseKey,
+		control.WorkerLeaseKey+":epoch",
 		control.InstanceID,
-		control.WorkerLeaseTTL.Milliseconds(),
-	).Slice()
+		control.WorkerLeaseTTL,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("acquire singleton worker lease: %w", err)
 	}
-	if len(result) != 2 || integerResult(result[0]) != 1 {
+	if !acquired {
 		return nil, ErrWorkerFenceHeld
 	}
-	token := integerResult(result[1])
 	if token <= 0 {
 		return nil, errors.New("acquire singleton worker lease returned an invalid fencing token")
 	}
@@ -110,21 +89,6 @@ func NewWorkerFence(client redis.UniversalClient, control runtimecontrol.Control
 	return fence, nil
 }
 
-func integerResult(value any) int64 {
-	switch value := value.(type) {
-	case int64:
-		return value
-	case string:
-		parsed, _ := strconv.ParseInt(value, 10, 64)
-		return parsed
-	case []byte:
-		parsed, _ := strconv.ParseInt(string(value), 10, 64)
-		return parsed
-	default:
-		return 0
-	}
-}
-
 func (f *WorkerFence) renewLoop(ctx context.Context) {
 	defer close(f.done)
 	ticker := time.NewTicker(f.control.WorkerRenewInterval)
@@ -135,15 +99,14 @@ func (f *WorkerFence) renewLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			renewCtx, cancel := context.WithTimeout(context.Background(), f.control.WorkerRenewInterval)
-			result, err := renewWorkerFenceScript.Run(
+			owned, err := f.backend.Renew(
 				renewCtx,
-				f.client,
-				[]string{f.control.WorkerLeaseKey},
+				f.control.WorkerLeaseKey,
 				f.value,
-				f.control.WorkerLeaseTTL.Milliseconds(),
-			).Int()
+				f.control.WorkerLeaseTTL,
+			)
 			cancel()
-			if err != nil || result != 1 {
+			if err != nil || !owned {
 				f.markLost()
 				return
 			}
@@ -195,12 +158,12 @@ func (f *WorkerFence) Stop() error {
 			f.cancel()
 		}
 		<-f.done
-		if !f.control.RequiresWorkerLease() || f.client == nil || f.value == "" {
+		if !f.control.RequiresWorkerLease() || f.backend == nil || f.value == "" {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), f.control.WorkerRenewInterval)
 		defer cancel()
-		if err := releaseWorkerFenceScript.Run(ctx, f.client, []string{f.control.WorkerLeaseKey}, f.value).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		if err := f.backend.Release(ctx, f.control.WorkerLeaseKey, f.value); err != nil {
 			releaseErr = fmt.Errorf("release singleton worker lease: %w", err)
 		}
 		f.valid.Store(false)

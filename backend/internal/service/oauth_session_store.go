@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 const DefaultOAuthSessionKeyPrefix = "sub2api:oauth-sessions"
@@ -25,7 +23,21 @@ const (
 var (
 	ErrOAuthSessionNotFound         = errors.New("oauth session not found or expired")
 	ErrOAuthSessionStoreUnavailable = errors.New("oauth session store unavailable")
+	// ErrOAuthSessionBackendNotFound is returned by a shared-state adapter when
+	// the requested key does not exist. Infrastructure adapters translate their
+	// native not-found error to this sentinel before it reaches the service.
+	ErrOAuthSessionBackendNotFound = errors.New("oauth session backend entry not found")
 )
+
+// OAuthSessionBackend is the small shared-state port required by the OAuth
+// session service. Redis and its atomic consume script live in the repository
+// layer so service code does not depend on a concrete infrastructure client.
+type OAuthSessionBackend interface {
+	Set(ctx context.Context, key string, payload []byte, ttl time.Duration) error
+	Get(ctx context.Context, key string) ([]byte, error)
+	Consume(ctx context.Context, key string) ([]byte, error)
+	Delete(ctx context.Context, key string) error
+}
 
 // OAuthSessionStore stores provider-scoped OAuth state. Consume must return and
 // delete a session atomically so an authorization code flow cannot be replayed.
@@ -138,30 +150,26 @@ func (s *MemoryOAuthSessionStore) Delete(ctx context.Context, provider, sessionI
 func (s *MemoryOAuthSessionStore) Close() error { return nil }
 
 // RedisOAuthSessionStore shares OAuth state across application instances. The
-// caller retains ownership of the Redis client and is responsible for closing it.
+// caller retains ownership of the injected backend and its lifecycle.
 type RedisOAuthSessionStore struct {
-	client    redis.UniversalClient
+	backend   OAuthSessionBackend
 	keyPrefix string
 }
 
-var consumeOAuthSessionScript = redis.NewScript(`
-local payload = redis.call("GET", KEYS[1])
-if not payload then
-  return nil
-end
-redis.call("DEL", KEYS[1])
-return payload
-`)
+var (
+	_ OAuthSessionStore = (*MemoryOAuthSessionStore)(nil)
+	_ OAuthSessionStore = (*RedisOAuthSessionStore)(nil)
+)
 
-func NewRedisOAuthSessionStore(client redis.UniversalClient, keyPrefix string) (*RedisOAuthSessionStore, error) {
-	if client == nil {
-		return nil, errors.New("redis oauth session client is required")
+func NewRedisOAuthSessionStore(backend OAuthSessionBackend, keyPrefix string) (*RedisOAuthSessionStore, error) {
+	if backend == nil {
+		return nil, errors.New("oauth session backend is required")
 	}
 	keyPrefix = strings.Trim(strings.TrimSpace(keyPrefix), ":")
 	if keyPrefix == "" {
 		keyPrefix = DefaultOAuthSessionKeyPrefix
 	}
-	return &RedisOAuthSessionStore{client: client, keyPrefix: keyPrefix}, nil
+	return &RedisOAuthSessionStore{backend: backend, keyPrefix: keyPrefix}, nil
 }
 
 func (s *RedisOAuthSessionStore) Save(ctx context.Context, provider, sessionID string, session any, ttl time.Duration) error {
@@ -176,7 +184,7 @@ func (s *RedisOAuthSessionStore) Save(ctx context.Context, provider, sessionID s
 	if err != nil {
 		return fmt.Errorf("encode oauth session: %w", err)
 	}
-	if err := s.client.Set(ctx, key, payload, ttl).Err(); err != nil {
+	if err := s.backend.Set(ctx, key, payload, ttl); err != nil {
 		return fmt.Errorf("%w: save failed", ErrOAuthSessionStoreUnavailable)
 	}
 	return nil
@@ -190,8 +198,8 @@ func (s *RedisOAuthSessionStore) Load(ctx context.Context, provider, sessionID s
 	if err := validateOAuthSessionOperation(ctx, destination, 0, false); err != nil {
 		return err
 	}
-	payload, err := s.client.Get(ctx, key).Bytes()
-	if errors.Is(err, redis.Nil) {
+	payload, err := s.backend.Get(ctx, key)
+	if errors.Is(err, ErrOAuthSessionBackendNotFound) {
 		return ErrOAuthSessionNotFound
 	}
 	if err != nil {
@@ -211,14 +219,14 @@ func (s *RedisOAuthSessionStore) Consume(ctx context.Context, provider, sessionI
 	if err := validateOAuthSessionOperation(ctx, destination, 0, false); err != nil {
 		return err
 	}
-	payload, err := consumeOAuthSessionScript.Run(ctx, s.client, []string{key}).Text()
-	if errors.Is(err, redis.Nil) {
+	payload, err := s.backend.Consume(ctx, key)
+	if errors.Is(err, ErrOAuthSessionBackendNotFound) {
 		return ErrOAuthSessionNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("%w: consume failed", ErrOAuthSessionStoreUnavailable)
 	}
-	if err := json.Unmarshal([]byte(payload), destination); err != nil {
+	if err := json.Unmarshal(payload, destination); err != nil {
 		return fmt.Errorf("decode oauth session: %w", err)
 	}
 	return nil
@@ -235,7 +243,7 @@ func (s *RedisOAuthSessionStore) Delete(ctx context.Context, provider, sessionID
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := s.client.Del(ctx, key).Err(); err != nil {
+	if err := s.backend.Delete(ctx, key); err != nil {
 		return fmt.Errorf("%w: delete failed", ErrOAuthSessionStoreUnavailable)
 	}
 	return nil
