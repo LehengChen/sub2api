@@ -20,7 +20,7 @@ permissions:
 
 env:
   GO_VERSION: "1.26.5"
-  NODE_VERSION: "20"
+  NODE_VERSION: "24"
   PNPM_VERSION: "9.15.9"
   GOVULNCHECK_VERSION: "v1.1.4"
   CANDIDATE_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -113,6 +113,19 @@ jobs:
             echo "invalid candidate version: $version" >&2
             exit 1
           }
+          source_version=$(tr -d '[:space:]' < backend/cmd/server/VERSION)
+          candidate_base_version=${version%%[-+]*}
+          test "$candidate_base_version" = "$source_version" || {
+            echo "candidate version $version does not match backend/cmd/server/VERSION $source_version" >&2
+            exit 1
+          }
+          if [[ "$EVENT_NAME" = push && "$REF_NAME" = frenzy/candidate/* ]]; then
+            tag_version=${REF_NAME#frenzy/candidate/}
+            test "$tag_version" = "$version" || {
+              echo "candidate tag $tag_version does not match requested version $version" >&2
+              exit 1
+            }
+          fi
 
           commit_epoch=$(git show -s --format=%ct "$SOURCE_SHA")
           utc_date=$(date -u -d "@$commit_epoch" '+%Y-%m-%dT%H:%M:%SZ')
@@ -149,6 +162,24 @@ jobs:
     if: ${{ needs.gate.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          POSTGRES_DB: sub2api_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sub2api_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
     env:
       VERSION: ${{ needs.gate.outputs.version }}
       COMMIT: ${{ needs.gate.outputs.commit }}
@@ -186,9 +217,42 @@ jobs:
         working-directory: backend
         env:
           CI: "true"
+          PROMPT_AUDIT_TEST_POSTGRES_DSN: postgres://postgres:ci-postgres-password@127.0.0.1:5432/sub2api_ci?sslmode=disable
+          PROMPT_AUDIT_TEST_REDIS_ADDR: 127.0.0.1:6379
         run: |
           set -o pipefail
           go test -tags=integration -count=1 -json ./... | tee /tmp/frenzy-evidence/backend/integration.json
+
+      - name: Require shared-state integration coverage
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          jq -s -e --argjson required '[
+            "TestPromptAuditMigrationSchemaAndLeakageGate",
+            "TestPromptAuditDatabasePersistsFullPromptOnEventsOnly",
+            "TestPromptAuditRepositoryAdmissionClaimFencingAndEventTransaction",
+            "TestPromptAuditRepositoryForeignKeysFiltersAndStableIdentitySnapshots",
+            "TestPromptAuditRepositoryHighWaterAndSafeDeletion",
+            "TestPromptAuditServiceConfirmationKeepsPostPreviewEventsAndConcurrentDeletesAreSafe",
+            "TestRedisPayloadStoreRoundTripTTLNamespaceAndDelete",
+            "TestPromptRuntimeAggregatesConfigWorkersQueueRedisEndpointsAndGuardMetrics",
+            "TestPromptAuditConfigCASSecretRoundTripInvalidationAndTTL"
+          ]' '
+            . as $events |
+            all($required[]; . as $name | any($events[]; .Action == "pass" and .Test == $name)) and
+            ([$events[] | select(.Action == "skip" and (.Test as $name | $required | index($name) != null))] | length == 0)
+          ' /tmp/frenzy-evidence/backend/integration.json >/dev/null
+
+      - name: Targeted race gate
+        working-directory: backend
+        # Keep this gate limited to the new shared-state contracts. A broad
+        # service-package race run currently reports unrelated legacy tests
+        # that mutate process-global fixtures concurrently; it is tracked as
+        # a separate cleanup item rather than treated as candidate evidence.
+        run: |
+          set -euo pipefail
+          go test -race -tags=unit -count=1 ./internal/runtimecontrol ./internal/server
+          go test -race -tags=unit -count=1 -run 'TestWorkerFence|TestRedisOAuthSessionStore|TestOAuthSessionStore' ./internal/service
 
       - name: Ent and Wire generation clean check
         working-directory: backend
@@ -498,6 +562,36 @@ jobs:
           provenance=requested buildx mode=max; local artifact only
           sbom=requested buildx; local artifact only
           EOF
+
+      - name: Load a local scan image (no registry push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: local/sub2api:frenzy-scan-${{ needs.gate.outputs.commit }}
+          build-args: |
+            VERSION=${{ needs.gate.outputs.version }}
+            COMMIT=${{ needs.gate.outputs.commit }}
+            DATE=${{ needs.gate.outputs.utc_date }}
+          provenance: false
+          sbom: false
+
+      - name: Export local scan image
+        run: docker save "local/sub2api:frenzy-scan-${{ needs.gate.outputs.commit }}" -o evidence/image/scan-image.tar
+
+      - name: Scan candidate image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: ${{ github.workspace }}/evidence/image/scan-image.tar
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          ignore-unfixed: true
+          format: json
+          output: ${{ github.workspace }}/evidence/image/trivy.json
+          exit-code: 1
 
       - name: Upload non-production OCI and evidence artifact
         if: always()

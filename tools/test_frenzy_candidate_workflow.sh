@@ -65,6 +65,7 @@ for field in ("VERSION", "COMMIT", "DATE", "full_commit", "utc_date"):
 for command, description in (
     (r"go test -tags=unit", "backend unit tests"),
     (r"go test -tags=integration", "integration harness"),
+    (r"go test -race -tags=unit", "targeted race gate"),
     (r"go generate ./ent", "Ent generation"),
     (r"go generate ./cmd/server", "Wire generation"),
     (r"pnpm run lint:check", "frontend lint"),
@@ -74,6 +75,9 @@ for command, description in (
     (r"govulncheck", "govulncheck"),
     (r"pnpm audit --prod --audit-level=high --json", "pnpm audit"),
     (r"check_pnpm_audit_exceptions\.py", "audit exception gate"),
+    (r"PROMPT_AUDIT_TEST_POSTGRES_DSN", "Prompt Audit PostgreSQL integration dependency"),
+    (r"PROMPT_AUDIT_TEST_REDIS_ADDR", "Prompt Audit Redis integration dependency"),
+    (r"Require shared-state integration coverage", "required integration skip rejection"),
 ):
     require(command, description)
 
@@ -82,6 +86,9 @@ for pattern, description in (
     (r"outputs:\s+type=oci,dest=", "OCI output"),
     (r"provenance:\s+mode=max", "Buildx provenance"),
     (r"sbom:\s+true", "Buildx SBOM"),
+    (r"aquasecurity/trivy-action@v0\.36\.0", "pinned Trivy image scan"),
+    (r"input:\s+\$\{\{ github\.workspace \}\}/evidence/image/scan-image\.tar", "Trivy local image input"),
+    (r"exit-code:\s+1", "blocking image vulnerability scan"),
     (r"registry_image_digest:\s+\{status: \"missing\"", "missing registry digest report"),
     (r"signature:\s+\{status: \"missing\"", "missing signature report"),
     (r"actions/upload-artifact@", "non-production artifact upload"),
