@@ -8,6 +8,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
@@ -170,8 +171,8 @@ var ProviderSet = wire.NewSet(
 //
 // 依赖：config.Config
 // 提供：*ent.Client
-func ProvideEnt(cfg *config.Config) (*ent.Client, error) {
-	client, _, err := InitEnt(cfg)
+func ProvideEnt(cfg *config.Config, control runtimecontrol.Control) (*ent.Client, error) {
+	client, _, err := InitEntForRuntime(cfg, control)
 	return client, err
 }
 

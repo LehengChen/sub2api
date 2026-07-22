@@ -50,6 +50,36 @@ func TestEnsureBootstrapSecretsNilInputs(t *testing.T) {
 	require.Contains(t, err.Error(), "nil config")
 }
 
+func TestLoadBootstrapSecretsReadOnlyNeverCreatesRows(t *testing.T) {
+	client := newSecuritySecretTestClient(t)
+	cfg := &config.Config{JWT: config.JWTConfig{Secret: "configured-jwt-secret-32bytes-long!!"}}
+
+	require.NoError(t, loadBootstrapSecretsReadOnly(context.Background(), client, cfg))
+	count, err := client.SecuritySecret.Query().Count(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func TestLoadBootstrapSecretsReadOnlyUsesPersistedValue(t *testing.T) {
+	client := newSecuritySecretTestClient(t)
+	_, err := client.SecuritySecret.Create().
+		SetKey(securitySecretKeyJWT).
+		SetValue("persisted-jwt-secret-32bytes-long!!!").
+		Save(context.Background())
+	require.NoError(t, err)
+	cfg := &config.Config{JWT: config.JWTConfig{Secret: "different-configured-jwt-secret-32!!"}}
+
+	require.NoError(t, loadBootstrapSecretsReadOnly(context.Background(), client, cfg))
+	require.Equal(t, "persisted-jwt-secret-32bytes-long!!!", cfg.JWT.Secret)
+}
+
+func TestLoadBootstrapSecretsReadOnlyRequiresExistingOrConfiguredSecret(t *testing.T) {
+	client := newSecuritySecretTestClient(t)
+	err := loadBootstrapSecretsReadOnly(context.Background(), client, &config.Config{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "persisted jwt secret is required")
+}
+
 func TestEnsureBootstrapSecretsGenerateAndPersistJWTSecret(t *testing.T) {
 	client := newSecuritySecretTestClient(t)
 	cfg := &config.Config{}

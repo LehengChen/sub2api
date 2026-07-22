@@ -16,7 +16,7 @@ func TestProvideTimingWheelService_ReturnsError(t *testing.T) {
 		return nil, errors.New("boom")
 	}
 
-	svc, err := ProvideTimingWheelService()
+	svc, err := ProvideTimingWheelService(nil)
 	if err == nil {
 		t.Fatalf("期望返回 error，但得到 nil")
 	}
@@ -26,7 +26,7 @@ func TestProvideTimingWheelService_ReturnsError(t *testing.T) {
 }
 
 func TestProvideTimingWheelService_Success(t *testing.T) {
-	svc, err := ProvideTimingWheelService()
+	svc, err := ProvideTimingWheelService(nil)
 	if err != nil {
 		t.Fatalf("期望 err 为 nil，但得到: %v", err)
 	}

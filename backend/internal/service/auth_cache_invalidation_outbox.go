@@ -286,8 +286,8 @@ func (w *AuthCacheInvalidationWorker) Health(ctx context.Context) AuthCacheInval
 	return health
 }
 
-func ProvideAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, apiKeyService *APIKeyService) *AuthCacheInvalidationWorker {
+func ProvideAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, apiKeyService *APIKeyService, fence *WorkerFence) *AuthCacheInvalidationWorker {
 	worker := NewAuthCacheInvalidationWorker(repo, cache, apiKeyService)
-	worker.Start()
+	startSingletonWorker(fence, worker.Start)
 	return worker
 }
