@@ -30,6 +30,7 @@ const { appStore, performUpdate, restartService, getRollbackVersions, rollback }
       ops_revision: 'abcdef0123456789abcdef0123456789abcdef01'
     },
     catalogStatus: 'valid',
+    identityStatus: 'source_verified',
     fetchVersion: vi.fn().mockResolvedValue(null),
     clearVersionCache: vi.fn()
   },
@@ -67,6 +68,7 @@ describe('VersionBadge deployment controls', () => {
     appStore.managedExternally = true
     appStore.hasUpdate = true
     appStore.catalogStatus = 'valid'
+    appStore.identityStatus = 'source_verified'
     appStore.fetchVersion.mockClear()
     performUpdate.mockReset()
     restartService.mockReset()
@@ -109,5 +111,16 @@ describe('VersionBadge deployment controls', () => {
     expect(wrapper.text()).toContain('version.cachedWarning')
     expect(wrapper.text()).toContain('version.statusUnverified')
     expect(wrapper.text()).not.toContain('version.upToDate')
+  })
+
+  it('shows a warning for an unverified running source identity', async () => {
+    appStore.catalogStatus = 'identity-mismatch'
+    appStore.identityStatus = 'source_mismatch'
+    appStore.hasUpdate = false
+
+    const wrapper = mount(VersionBadge)
+    await wrapper.get('button').trigger('click')
+
+    expect(wrapper.text()).toContain('version.catalogIdentityUnverified')
   })
 })

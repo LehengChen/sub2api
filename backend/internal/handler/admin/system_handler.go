@@ -85,6 +85,7 @@ func (h *SystemHandler) GetVersion(c *gin.Context) {
 		"capabilities":       info.Capabilities,
 		"catalog":            info.Catalog,
 		"catalog_status":     info.CatalogStatus,
+		"identity_status":    info.IdentityStatus,
 	})
 }
 

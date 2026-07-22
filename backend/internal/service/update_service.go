@@ -64,6 +64,7 @@ type UpdateService struct {
 	cache          UpdateCache
 	githubClient   GitHubReleaseClient
 	currentVersion string
+	buildCommit    string
 	buildType      string // "source" for manual builds, "release" for CI builds
 	deployment     DeploymentControl
 }
@@ -103,8 +104,9 @@ type UpdateInfo struct {
 	ManagedExternally bool               `json:"managed_externally"`
 	Capabilities      UpdateCapabilities `json:"capabilities"`
 	Catalog           *ReleaseCatalog    `json:"catalog,omitempty"`
-	CatalogStatus     string             `json:"catalog_status,omitempty"` // valid, incomplete
-	CheckStatus       string             `json:"check_status,omitempty"`   // fresh, cached, error, managed, unconfigured
+	CatalogStatus     string             `json:"catalog_status,omitempty"`  // valid, incomplete
+	IdentityStatus    string             `json:"identity_status,omitempty"` // source_verified, source_mismatch, unverified
+	CheckStatus       string             `json:"check_status,omitempty"`    // fresh, cached, error, managed, unconfigured
 }
 
 // ReleaseInfo contains GitHub release details
@@ -519,7 +521,24 @@ func (s *UpdateService) checkManagedCatalog() *UpdateInfo {
 		return info
 	}
 
+	buildCommit := strings.ToLower(strings.TrimSpace(s.buildCommit))
+	if !hexRevisionPattern.MatchString(buildCommit) {
+		info.CatalogStatus = "identity-unverified"
+		info.IdentityStatus = "unverified"
+		info.CheckStatus = "error"
+		info.Warning = "Running source revision is unavailable; approved release identity cannot be verified."
+		return info
+	}
+	if !strings.EqualFold(buildCommit, catalog.SourceRevision) {
+		info.CatalogStatus = "identity-mismatch"
+		info.IdentityStatus = "source_mismatch"
+		info.CheckStatus = "error"
+		info.Warning = "Running source revision does not match the approved release catalog."
+		return info
+	}
+
 	info.CatalogStatus = "valid"
+	info.IdentityStatus = "source_verified"
 	info.HasUpdate = compareVersions(s.currentVersion, info.LatestVersion) < 0
 	return info
 }

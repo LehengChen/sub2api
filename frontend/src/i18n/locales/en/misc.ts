@@ -70,7 +70,8 @@ export default {
     sourceRevision: 'Source revision',
     imageDigest: 'Image digest',
     opsRevision: 'Operations revision',
-    catalogIncomplete: 'The approved release identity is incomplete. Contact operations before deployment.'
+    catalogIncomplete: 'The approved release identity is incomplete. Contact operations before deployment.',
+    catalogIdentityUnverified: 'The running source revision does not match the approved release identity.'
   },
 
   // Recharge / Subscription Page

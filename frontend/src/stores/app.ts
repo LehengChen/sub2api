@@ -58,6 +58,7 @@ export const useAppStore = defineStore('app', () => {
   })
   const releaseCatalog = ref<ReleaseCatalog | null>(null)
   const catalogStatus = ref<string>('')
+  const identityStatus = ref<string>('')
 
   // Auto-incrementing ID for toasts
   let toastIdCounter = 0
@@ -271,7 +272,8 @@ export const useAppStore = defineStore('app', () => {
         managed_externally: managedExternally.value,
         capabilities: updateCapabilities.value,
         catalog: releaseCatalog.value || undefined,
-        catalog_status: catalogStatus.value || undefined
+        catalog_status: catalogStatus.value || undefined,
+        identity_status: identityStatus.value || undefined
       }
     }
 
@@ -302,6 +304,7 @@ export const useAppStore = defineStore('app', () => {
       }
       releaseCatalog.value = data.catalog || null
       catalogStatus.value = data.catalog_status || ''
+      identityStatus.value = data.identity_status || ''
       versionLoaded.value = true
       return data
     } catch (error) {
@@ -506,6 +509,7 @@ export const useAppStore = defineStore('app', () => {
     updateCapabilities,
     releaseCatalog,
     catalogStatus,
+    identityStatus,
 
     // Computed
     hasActiveToasts,

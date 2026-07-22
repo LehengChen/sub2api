@@ -207,6 +207,7 @@ func TestUpdateServiceExternalModeUsesCatalogWithoutGitHub(t *testing.T) {
 		},
 	}
 	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.1.151", "release", control)
+	svc.buildCommit = control.Catalog.SourceRevision
 
 	info, err := svc.CheckUpdate(context.Background(), true)
 
@@ -214,11 +215,40 @@ func TestUpdateServiceExternalModeUsesCatalogWithoutGitHub(t *testing.T) {
 	require.True(t, info.ManagedExternally)
 	require.Equal(t, "managed", info.CheckStatus)
 	require.Equal(t, "valid", info.CatalogStatus)
+	require.Equal(t, "source_verified", info.IdentityStatus)
 	require.Equal(t, "0.1.163", info.LatestVersion)
 	require.True(t, info.HasUpdate)
 	require.False(t, info.Capabilities.Update)
 	require.Equal(t, 0, client.latestCalls)
 	require.Equal(t, 0, client.recentCalls)
+}
+
+func TestUpdateServiceExternalModeRejectsCatalogSourceMismatch(t *testing.T) {
+	control := DeploymentControl{
+		Mode: DeploymentModeExternallyManaged,
+		Catalog: ReleaseCatalog{
+			Source:           "frenzy-release-catalog",
+			Revision:         "catalog-20260722-01",
+			Version:          "0.1.163",
+			AppTag:           "frenzy/app/v0.1.163-frenzy.1",
+			SourceRepository: "LehengChen/sub2api",
+			SourceRevision:   "0123456789abcdef0123456789abcdef01234567",
+			ImageTag:         "v0.1.163-frenzy.1",
+			ImageDigest:      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			OpsRevision:      "abcdef0123456789abcdef0123456789abcdef01",
+		},
+	}
+	svc := NewUpdateService(&updateServiceCacheStub{}, &updateServiceGitHubClientStub{}, "0.1.163", "release", control)
+	svc.buildCommit = "ffffffffffffffffffffffffffffffffffffffff"
+
+	info, err := svc.CheckUpdate(context.Background(), false)
+
+	require.NoError(t, err)
+	require.Equal(t, "identity-mismatch", info.CatalogStatus)
+	require.Equal(t, "source_mismatch", info.IdentityStatus)
+	require.Equal(t, "error", info.CheckStatus)
+	require.NotEmpty(t, info.Warning)
+	require.False(t, info.HasUpdate)
 }
 
 func TestUpdateServiceExternalModeWarnsWhenCatalogIncomplete(t *testing.T) {

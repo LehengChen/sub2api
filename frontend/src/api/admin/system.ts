@@ -43,6 +43,7 @@ export interface VersionInfo {
   capabilities?: UpdateCapabilities
   catalog?: ReleaseCatalog
   catalog_status?: 'valid' | 'incomplete' | string
+  identity_status?: 'source_verified' | 'source_mismatch' | 'unverified' | string
   check_status?: 'fresh' | 'cached' | 'error' | 'managed' | 'unconfigured' | string
 }
 

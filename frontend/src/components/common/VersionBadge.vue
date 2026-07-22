@@ -208,10 +208,14 @@
                   </div>
                 </dl>
                 <p
-                  v-if="catalogStatus === 'incomplete'"
+                  v-if="catalogStatus === 'incomplete' || catalogStatus === 'identity-unverified' || catalogStatus === 'identity-mismatch'"
                   class="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-700 dark:border-amber-800/50 dark:bg-amber-900/20 dark:text-amber-300"
                 >
-                  {{ t('version.catalogIncomplete') }}
+                  {{
+                    catalogStatus === 'incomplete'
+                      ? t('version.catalogIncomplete')
+                      : t('version.catalogIdentityUnverified')
+                  }}
                 </p>
               </div>
 

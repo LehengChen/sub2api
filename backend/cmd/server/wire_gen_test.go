@@ -18,6 +18,7 @@ import (
 func TestProvideServiceBuildInfo(t *testing.T) {
 	in := handler.BuildInfo{
 		Version:   "v-test",
+		Commit:    "0123456789abcdef0123456789abcdef01234567",
 		BuildType: "release",
 		DeploymentControl: service.DeploymentControl{
 			Mode: service.DeploymentModeExternallyManaged,
@@ -25,6 +26,7 @@ func TestProvideServiceBuildInfo(t *testing.T) {
 	}
 	out := provideServiceBuildInfo(in)
 	require.Equal(t, in.Version, out.Version)
+	require.Equal(t, in.Commit, out.Commit)
 	require.Equal(t, in.BuildType, out.BuildType)
 	require.Equal(t, in.DeploymentControl, out.DeploymentControl)
 }

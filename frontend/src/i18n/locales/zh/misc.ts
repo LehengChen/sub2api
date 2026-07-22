@@ -68,7 +68,8 @@ export default {
     sourceRevision: '源码版本',
     imageDigest: '镜像摘要',
     opsRevision: '运维版本',
-    catalogIncomplete: '批准的发布身份信息不完整，部署前请联系运维人员。'
+    catalogIncomplete: '批准的发布身份信息不完整，部署前请联系运维人员。',
+    catalogIdentityUnverified: '当前运行源码版本与批准的发布身份不一致，不能视为已核验。'
   },
 
   // Recharge / Subscription Page

@@ -19,6 +19,7 @@ import (
 // BuildInfo contains build information
 type BuildInfo struct {
 	Version           string
+	Commit            string
 	BuildType         string
 	DeploymentControl DeploymentControl
 }
@@ -35,7 +36,9 @@ func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient)
 
 // ProvideUpdateService creates UpdateService with BuildInfo
 func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, buildInfo BuildInfo) *UpdateService {
-	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType, buildInfo.DeploymentControl)
+	svc := NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType, buildInfo.DeploymentControl)
+	svc.buildCommit = buildInfo.Commit
+	return svc
 }
 
 // ProvideEmailQueueService creates EmailQueueService with default worker count

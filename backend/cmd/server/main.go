@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -70,7 +71,22 @@ func main() {
 		return
 	}
 
-	// CLI setup mode
+	runtimeControl, err := runtimecontrol.LoadFromEnv()
+	if err != nil {
+		log.Fatalf("Invalid process runtime control: %v", err)
+	}
+	deploymentControl, err := service.LoadDeploymentControlFromEnv()
+	if err != nil {
+		log.Fatalf("Invalid deployment control: %v", err)
+	}
+	// Enforce the external ownership boundary before setup/AUTO_SETUP can
+	// perform any database or bootstrap writes. Explicit roles are the only
+	// allowed production entry points; migration-only remains a separate role.
+	if err := validateStartupPolicy(runtimeControl, deploymentControl, *setupMode, *migrateMode); err != nil {
+		log.Fatal(err)
+	}
+
+	// CLI setup mode is available only to self-managed installations.
 	if *setupMode {
 		if err := setup.RunCLI(); err != nil {
 			log.Fatalf("Setup failed: %v", err)
@@ -78,10 +94,6 @@ func main() {
 		return
 	}
 
-	runtimeControl, err := runtimecontrol.LoadFromEnv()
-	if err != nil {
-		log.Fatalf("Invalid process runtime control: %v", err)
-	}
 	if *migrateMode || runtimeControl.Role == runtimecontrol.RoleMigrator {
 		runMigrator()
 		return
@@ -107,7 +119,23 @@ func main() {
 	}
 
 	// Normal server mode
-	runMainServer(runtimeControl)
+	runMainServer(runtimeControl, deploymentControl)
+}
+
+func validateStartupPolicy(runtimeControl runtimecontrol.Control, deploymentControl service.DeploymentControl, setupMode bool, migrateMode bool) error {
+	if !deploymentControl.IsExternallyManaged() {
+		return nil
+	}
+	if runtimeControl.Role == runtimecontrol.RoleAll {
+		return fmt.Errorf("externally managed deployments must set %s to an explicit non-legacy role", runtimecontrol.ProcessRoleEnv)
+	}
+	if setupMode {
+		return errors.New("externally managed deployments cannot run setup mode")
+	}
+	if migrateMode && runtimeControl.Role != runtimecontrol.RoleMigrator {
+		return errors.New("externally managed migrations must use the migrator process role")
+	}
+	return nil
 }
 
 func runMigrator() {
@@ -160,7 +188,7 @@ func runSetupServer() {
 	}
 }
 
-func runMainServer(runtimeControl runtimecontrol.Control) {
+func runMainServer(runtimeControl runtimecontrol.Control, deploymentControl service.DeploymentControl) {
 	cfg, err := config.LoadForBootstrap()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -172,16 +200,9 @@ func runMainServer(runtimeControl runtimecontrol.Control) {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
 
-	deploymentControl, err := service.LoadDeploymentControlFromEnv()
-	if err != nil {
-		log.Fatalf("Invalid deployment control: %v", err)
-	}
-	if deploymentControl.IsExternallyManaged() && runtimeControl.Role == runtimecontrol.RoleAll {
-		log.Fatalf("Externally managed deployments must set %s to an explicit non-legacy role", runtimecontrol.ProcessRoleEnv)
-	}
-
 	buildInfo := handler.BuildInfo{
 		Version:           Version,
+		Commit:            Commit,
 		BuildType:         BuildType,
 		DeploymentControl: deploymentControl,
 		RuntimeControl:    runtimeControl,
