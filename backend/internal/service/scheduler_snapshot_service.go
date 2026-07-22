@@ -125,8 +125,12 @@ type SchedulerSnapshotService struct {
 	groupRepo                    GroupRepository
 	cfg                          *config.Config
 	stopCh                       chan struct{}
+	startOnce                    sync.Once
 	stopOnce                     sync.Once
 	wg                           sync.WaitGroup
+	initialMu                    sync.RWMutex
+	initialDone                  chan struct{}
+	initialErr                   error
 	fallbackLimit                *fallbackLimiter
 	lagMu                        sync.Mutex
 	lagFailures                  int
@@ -163,37 +167,66 @@ func NewSchedulerSnapshotService(
 		groupRepo:     groupRepo,
 		cfg:           cfg,
 		stopCh:        make(chan struct{}),
+		initialDone:   make(chan struct{}),
 		fallbackLimit: newFallbackLimiter(maxQPS),
 	}
 }
 
 func (s *SchedulerSnapshotService) Start() {
-	if s == nil || s.cache == nil {
+	if s == nil {
 		return
 	}
-
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.runInitialRebuild()
-	}()
-
-	interval := s.outboxPollInterval()
-	if s.outboxRepo != nil && interval > 0 {
+	s.startOnce.Do(func() {
+		if s.cache == nil {
+			s.completeInitialRebuild(nil)
+			return
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.runOutboxWorker(interval)
+			s.completeInitialRebuild(s.runInitialRebuildResult())
 		}()
+
+		interval := s.outboxPollInterval()
+		if s.outboxRepo != nil && interval > 0 {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.runOutboxWorker(interval)
+			}()
+		}
+
+		fullInterval := s.fullRebuildInterval()
+		if fullInterval > 0 {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.runFullRebuildWorker(fullInterval)
+			}()
+		}
+	})
+}
+
+func (s *SchedulerSnapshotService) completeInitialRebuild(err error) {
+	s.initialMu.Lock()
+	s.initialErr = err
+	close(s.initialDone)
+	s.initialMu.Unlock()
+}
+
+// InitialRebuildReady is a non-blocking readiness probe for the critical
+// scheduler snapshot initialization performed by active worker processes.
+func (s *SchedulerSnapshotService) InitialRebuildReady() error {
+	if s == nil {
+		return ErrSchedulerCacheNotReady
 	}
-
-	fullInterval := s.fullRebuildInterval()
-	if fullInterval > 0 {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.runFullRebuildWorker(fullInterval)
-		}()
+	select {
+	case <-s.initialDone:
+		s.initialMu.RLock()
+		defer s.initialMu.RUnlock()
+		return s.initialErr
+	default:
+		return ErrSchedulerCacheNotReady
 	}
 }
 
@@ -297,10 +330,14 @@ func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, acc
 }
 
 func (s *SchedulerSnapshotService) runInitialRebuild() {
+	_ = s.runInitialRebuildResult()
+}
+
+func (s *SchedulerSnapshotService) runInitialRebuildResult() error {
 	if s.cache == nil {
-		return
+		return nil
 	}
-	_ = s.coalesceFullRebuild(func() error {
+	return s.coalesceFullRebuild(func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		if err := s.rebuildFullSnapshot(ctx, "startup"); err != nil {

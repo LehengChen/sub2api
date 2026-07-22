@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
+	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
 	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -27,6 +28,7 @@ import (
 type Application struct {
 	Server      *http.Server
 	Health      *server.HealthService
+	WorkerFence *service.WorkerFence
 	PromptAudit *securityaudit.PromptService
 	Cleanup     func()
 }
@@ -52,14 +54,19 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 
 		// BuildInfo provider
 		provideServiceBuildInfo,
+		provideRuntimeControl,
 
 		// Cleanup function provider
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "Health", "PromptAudit", "Cleanup"),
+		wire.Struct(new(Application), "Server", "Health", "WorkerFence", "PromptAudit", "Cleanup"),
 	)
 	return nil, nil
+}
+
+func provideRuntimeControl(buildInfo handler.BuildInfo) runtimecontrol.Control {
+	return buildInfo.RuntimeControl
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
