@@ -10,7 +10,9 @@ import { i18n } from '@/i18n'
 import {
   checkUpdates as checkUpdatesAPI,
   type VersionInfo,
-  type ReleaseInfo
+  type ReleaseInfo,
+  type ReleaseCatalog,
+  type UpdateCapabilities
 } from '@/api/admin/system'
 import { getPublicSettings as fetchPublicSettingsAPI } from '@/api/auth'
 
@@ -43,6 +45,19 @@ export const useAppStore = defineStore('app', () => {
   const hasUpdate = ref<boolean>(false)
   const buildType = ref<string>('source')
   const releaseInfo = ref<ReleaseInfo | null>(null)
+  const versionCached = ref<boolean>(false)
+  const versionWarning = ref<string>('')
+  const versionCheckStatus = ref<string>('')
+  const deploymentMode = ref<string>('self_managed')
+  const managedExternally = ref<boolean>(false)
+  const updateCapabilities = ref<UpdateCapabilities>({
+    check_updates: true,
+    update: true,
+    rollback: true,
+    restart: true
+  })
+  const releaseCatalog = ref<ReleaseCatalog | null>(null)
+  const catalogStatus = ref<string>('')
 
   // Auto-incrementing ID for toasts
   let toastIdCounter = 0
@@ -249,7 +264,14 @@ export const useAppStore = defineStore('app', () => {
         has_update: hasUpdate.value,
         build_type: buildType.value,
         release_info: releaseInfo.value || undefined,
-        cached: true
+        cached: true,
+        warning: versionWarning.value || undefined,
+        check_status: versionCheckStatus.value || 'cached',
+        deployment_mode: deploymentMode.value,
+        managed_externally: managedExternally.value,
+        capabilities: updateCapabilities.value,
+        catalog: releaseCatalog.value || undefined,
+        catalog_status: catalogStatus.value || undefined
       }
     }
 
@@ -266,10 +288,32 @@ export const useAppStore = defineStore('app', () => {
       hasUpdate.value = data.has_update
       buildType.value = data.build_type || 'source'
       releaseInfo.value = data.release_info || null
+      versionCached.value = data.cached
+      versionWarning.value = data.warning || ''
+      versionCheckStatus.value = data.check_status || (data.cached ? 'cached' : 'fresh')
+      deploymentMode.value = data.deployment_mode || 'self_managed'
+      managedExternally.value =
+        data.managed_externally === true || deploymentMode.value === 'externally_managed'
+      updateCapabilities.value = data.capabilities || {
+        check_updates: true,
+        update: !managedExternally.value,
+        rollback: !managedExternally.value,
+        restart: !managedExternally.value
+      }
+      releaseCatalog.value = data.catalog || null
+      catalogStatus.value = data.catalog_status || ''
       versionLoaded.value = true
       return data
     } catch (error) {
       console.error('Failed to fetch version:', error)
+      const message =
+        (error as { response?: { data?: { message?: string } }; message?: string }).response?.data
+          ?.message ||
+        (error as { message?: string }).message ||
+        i18n.global.t('version.checkFailed')
+      versionWarning.value = message
+      versionCheckStatus.value = 'error'
+      versionCached.value = false
       return null
     } finally {
       versionLoading.value = false
@@ -282,6 +326,9 @@ export const useAppStore = defineStore('app', () => {
   function clearVersionCache(): void {
     versionLoaded.value = false
     hasUpdate.value = false
+    versionCached.value = false
+    versionWarning.value = ''
+    versionCheckStatus.value = ''
   }
 
   // ==================== Public Settings Management ====================
@@ -451,6 +498,14 @@ export const useAppStore = defineStore('app', () => {
     hasUpdate,
     buildType,
     releaseInfo,
+    versionCached,
+    versionWarning,
+    versionCheckStatus,
+    deploymentMode,
+    managedExternally,
+    updateCapabilities,
+    releaseCatalog,
+    catalogStatus,
 
     // Computed
     hasActiveToasts,

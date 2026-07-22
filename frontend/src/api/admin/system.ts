@@ -11,6 +11,25 @@ export interface ReleaseInfo {
   html_url: string
 }
 
+export interface ReleaseCatalog {
+  source?: string
+  revision?: string
+  version?: string
+  app_tag?: string
+  source_repository?: string
+  source_revision?: string
+  image_tag?: string
+  image_digest?: string
+  ops_revision?: string
+}
+
+export interface UpdateCapabilities {
+  check_updates: boolean
+  update: boolean
+  rollback: boolean
+  restart: boolean
+}
+
 export interface VersionInfo {
   current_version: string
   latest_version: string
@@ -19,6 +38,12 @@ export interface VersionInfo {
   cached: boolean
   warning?: string
   build_type: string // "source" for manual builds, "release" for CI builds
+  deployment_mode?: 'self_managed' | 'externally_managed' | string
+  managed_externally?: boolean
+  capabilities?: UpdateCapabilities
+  catalog?: ReleaseCatalog
+  catalog_status?: 'valid' | 'incomplete' | string
+  check_status?: 'fresh' | 'cached' | 'error' | 'managed' | 'unconfigured' | string
 }
 
 /**

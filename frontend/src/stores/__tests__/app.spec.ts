@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { getPublicSettings } from '@/api/auth'
+import { checkUpdates } from '@/api/admin/system'
 import type { PublicSettings } from '@/types'
 
 function createDeferred<T>() {
@@ -75,6 +76,7 @@ describe('useAppStore', () => {
     vi.useFakeTimers()
     localStorage.clear()
     vi.mocked(getPublicSettings).mockReset()
+    vi.mocked(checkUpdates).mockReset()
     // 清除 window.__APP_CONFIG__
     delete (window as any).__APP_CONFIG__
   })
@@ -85,6 +87,78 @@ describe('useAppStore', () => {
   })
 
   // --- Toast 消息管理 ---
+
+  describe('Version management', () => {
+    it('preserves external deployment capabilities and catalog identity', async () => {
+      vi.mocked(checkUpdates).mockResolvedValue({
+        current_version: '0.1.151',
+        latest_version: '0.1.163',
+        has_update: true,
+        cached: false,
+        build_type: 'release',
+        deployment_mode: 'externally_managed',
+        managed_externally: true,
+        check_status: 'managed',
+        catalog_status: 'valid',
+        capabilities: {
+          check_updates: true,
+          update: false,
+          rollback: false,
+          restart: false
+        },
+        catalog: {
+          source: 'frenzy-release-catalog',
+          version: '0.1.163',
+          app_tag: 'frenzy/app/v0.1.163-frenzy.1',
+          source_revision: '0123456789abcdef0123456789abcdef01234567',
+          image_digest:
+            'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+          ops_revision: 'abcdef0123456789abcdef0123456789abcdef01'
+        }
+      })
+      const store = useAppStore()
+
+      await store.fetchVersion(true)
+
+      expect(store.managedExternally).toBe(true)
+      expect(store.deploymentMode).toBe('externally_managed')
+      expect(store.updateCapabilities.update).toBe(false)
+      expect(store.updateCapabilities.rollback).toBe(false)
+      expect(store.releaseCatalog?.app_tag).toBe('frenzy/app/v0.1.163-frenzy.1')
+      expect(store.catalogStatus).toBe('valid')
+    })
+
+    it('retains cached and warning state so UI cannot claim up-to-date', async () => {
+      vi.mocked(checkUpdates).mockResolvedValue({
+        current_version: '0.1.151',
+        latest_version: '0.1.151',
+        has_update: false,
+        cached: true,
+        warning: 'Using cached data: catalog unavailable',
+        check_status: 'cached',
+        build_type: 'release'
+      })
+      const store = useAppStore()
+
+      await store.fetchVersion(true)
+
+      expect(store.hasUpdate).toBe(false)
+      expect(store.versionCached).toBe(true)
+      expect(store.versionWarning).toContain('catalog unavailable')
+      expect(store.versionCheckStatus).toBe('cached')
+    })
+
+    it('records an API failure as an unverified version state', async () => {
+      vi.mocked(checkUpdates).mockRejectedValue(new Error('catalog offline'))
+      const store = useAppStore()
+
+      const result = await store.fetchVersion(true)
+
+      expect(result).toBeNull()
+      expect(store.versionWarning).toBe('catalog offline')
+      expect(store.versionCheckStatus).toBe('error')
+    })
+  })
 
   describe('Toast 消息管理', () => {
     it('showSuccess 创建 success 类型 toast', () => {

@@ -98,6 +98,8 @@ Standard 下，分组还有两种计费类型：
 
 同样，`pilot` 与 `production` 是基础设施成熟度：RDS 是否 Multi-AZ、Redis 是否有副本、应用是否多副本、是否有演练和告警。把 `RUN_MODE` 改为 Standard 不会自动获得高可用。
 
+部署工件由谁控制也是独立维度。`SUB2API_DEPLOYMENT_CONTROL_MODE=self_managed|externally_managed` 只决定管理面板能否执行应用内更新、回退和重启，不改变 Simple/Standard 业务语义。不可变容器和受控生产环境应使用 `externally_managed`，并由批准 release catalog 提供 app tag、完整源码 SHA、镜像 digest 和 ops revision；详见 [`EXTERNAL_RELEASE_CONTROL.md`](EXTERNAL_RELEASE_CONTROL.md)。
+
 ## 推荐目标：受控 Standard
 
 适合当前需求的目标是：

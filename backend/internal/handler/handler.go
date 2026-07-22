@@ -3,6 +3,7 @@ package handler
 import (
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 // AdminHandlers contains all admin-related HTTP handlers
@@ -67,6 +68,7 @@ type Handlers struct {
 
 // BuildInfo contains build-time information
 type BuildInfo struct {
-	Version   string
-	BuildType string // "source" for manual builds, "release" for CI builds
+	Version           string
+	BuildType         string // "source" for manual builds, "release" for CI builds
+	DeploymentControl service.DeploymentControl
 }

@@ -56,7 +56,21 @@ export default {
     deployScript: 'Script',
     deployDocker: 'Docker',
     dockerEditCompose: 'Edit the image tag in docker-compose.yml',
-    dockerRecreate: 'Recreate the container'
+    dockerRecreate: 'Recreate the container',
+    externallyManaged: 'Managed by external operations',
+    externallyManagedHint:
+      'Updates, rollbacks, and restarts are controlled by the approved release pipeline.',
+    checkWarning: 'Version status warning',
+    checkFailed: 'Version status could not be verified',
+    statusUnverified: 'Version status is unverified',
+    cachedWarning: 'This result came from cache and does not prove the current approved version.',
+    catalogSource: 'Release catalog',
+    approvedVersion: 'Approved version',
+    appTag: 'Application tag',
+    sourceRevision: 'Source revision',
+    imageDigest: 'Image digest',
+    opsRevision: 'Operations revision',
+    catalogIncomplete: 'The approved release identity is incomplete. Contact operations before deployment.'
   },
 
   // Recharge / Subscription Page

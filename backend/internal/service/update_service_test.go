@@ -31,13 +31,17 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestCalls    int
+	recentCalls    int
 }
 
 func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
+	s.latestCalls++
 	return s.release, nil
 }
 
 func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+	s.recentCalls++
 	return s.recentReleases, s.recentErr
 }
 
@@ -184,4 +188,83 @@ func TestUpdateServiceRollbackToVersionAcceptsVPrefix(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrRollbackVersionNotAllowed)
 	require.Contains(t, err.Error(), "no compatible release found")
+}
+
+func TestUpdateServiceExternalModeUsesCatalogWithoutGitHub(t *testing.T) {
+	client := &updateServiceGitHubClientStub{}
+	control := DeploymentControl{
+		Mode: DeploymentModeExternallyManaged,
+		Catalog: ReleaseCatalog{
+			Source:           "frenzy-release-catalog",
+			Revision:         "catalog-20260722-01",
+			Version:          "0.1.163",
+			AppTag:           "frenzy/app/v0.1.163-frenzy.1",
+			SourceRepository: "LehengChen/sub2api",
+			SourceRevision:   "0123456789abcdef0123456789abcdef01234567",
+			ImageTag:         "v0.1.163-frenzy.1",
+			ImageDigest:      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			OpsRevision:      "abcdef0123456789abcdef0123456789abcdef01",
+		},
+	}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.1.151", "release", control)
+
+	info, err := svc.CheckUpdate(context.Background(), true)
+
+	require.NoError(t, err)
+	require.True(t, info.ManagedExternally)
+	require.Equal(t, "managed", info.CheckStatus)
+	require.Equal(t, "valid", info.CatalogStatus)
+	require.Equal(t, "0.1.163", info.LatestVersion)
+	require.True(t, info.HasUpdate)
+	require.False(t, info.Capabilities.Update)
+	require.Equal(t, 0, client.latestCalls)
+	require.Equal(t, 0, client.recentCalls)
+}
+
+func TestUpdateServiceExternalModeWarnsWhenCatalogIncomplete(t *testing.T) {
+	control := DeploymentControl{
+		Mode:    DeploymentModeExternallyManaged,
+		Catalog: ReleaseCatalog{Version: "0.1.163"},
+	}
+	svc := NewUpdateService(&updateServiceCacheStub{}, &updateServiceGitHubClientStub{}, "0.1.151", "release", control)
+
+	info, err := svc.CheckUpdate(context.Background(), false)
+
+	require.NoError(t, err)
+	require.Equal(t, "unconfigured", info.CheckStatus)
+	require.Equal(t, "incomplete", info.CatalogStatus)
+	require.NotEmpty(t, info.Warning)
+	require.False(t, info.HasUpdate)
+	require.Equal(t, "0.1.151", info.LatestVersion)
+}
+
+func TestUpdateServiceExternalModeRejectsMutations(t *testing.T) {
+	control := DeploymentControl{Mode: DeploymentModeExternallyManaged}
+	svc := NewUpdateService(&updateServiceCacheStub{}, &updateServiceGitHubClientStub{}, "0.1.151", "release", control)
+
+	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrExternallyManaged)
+	require.ErrorIs(t, svc.Rollback(), ErrExternallyManaged)
+	_, err := svc.ListRollbackVersions(context.Background())
+	require.ErrorIs(t, err, ErrExternallyManaged)
+	require.ErrorIs(t, svc.RollbackToVersion(context.Background(), "0.1.150"), ErrExternallyManaged)
+}
+
+func TestUpdateServiceCacheWarningPreventsFalseUpToDateState(t *testing.T) {
+	cache := &updateServiceCacheStub{
+		data: `{"latest":"0.1.151","release_info":null,"timestamp":9999999999}`,
+	}
+	svc := NewUpdateService(cache, &updateServiceGitHubClientStub{}, "0.1.151", "release")
+
+	info, err := svc.CheckUpdate(context.Background(), false)
+
+	require.NoError(t, err)
+	require.True(t, info.Cached)
+	require.Equal(t, "cached", info.CheckStatus)
+	require.NotEmpty(t, info.Warning)
+	require.False(t, info.HasUpdate)
+}
+
+func TestCompareVersionsUnderstandsFrenzyTagSuffix(t *testing.T) {
+	require.Equal(t, -1, compareVersions("0.1.151-frenzy.1", "0.1.163"))
+	require.Equal(t, 0, compareVersions("v0.1.163-frenzy.1", "0.1.163"))
 }
