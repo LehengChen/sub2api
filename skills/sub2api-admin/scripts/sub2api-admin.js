@@ -313,7 +313,6 @@ const PROXY_OUTPUT_FIELDS = [
   "account_count",
   "latency_ms",
   "latency_status",
-  "latency_message",
   "ip_address",
   "country",
   "country_code",
@@ -322,7 +321,6 @@ const PROXY_OUTPUT_FIELDS = [
   "quality_status",
   "quality_score",
   "quality_grade",
-  "quality_summary",
   "quality_checked",
 ];
 
@@ -340,8 +338,10 @@ function redactProxy(proxy) {
       output[field] = proxy[field];
     }
   }
-  output.auth_present = hasCredential(proxy.username) || hasCredential(proxy.password);
-  output.password_present = hasCredential(proxy.password);
+  output.auth_present = proxy.auth_present === true
+    || hasCredential(proxy.username)
+    || hasCredential(proxy.password);
+  output.password_present = proxy.password_present === true || hasCredential(proxy.password);
   return output;
 }
 
@@ -363,7 +363,6 @@ function redactProxyCollection(data) {
 
 const PROXY_TEST_OUTPUT_FIELDS = [
   "success",
-  "message",
   "latency_ms",
   "ip_address",
   "city",
@@ -383,7 +382,7 @@ function redactProxyTestResult(result) {
   );
 }
 
-const PROXY_ACCOUNT_OUTPUT_FIELDS = ["id", "name", "platform", "type", "notes"];
+const PROXY_ACCOUNT_OUTPUT_FIELDS = ["id", "name", "platform", "type"];
 
 function redactProxyAccounts(data) {
   const items = Array.isArray(data) ? data : data && Array.isArray(data.items) ? data.items : null;
