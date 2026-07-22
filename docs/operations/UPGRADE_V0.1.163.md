@@ -22,12 +22,18 @@ security 成功，其中 backend 使用真实 PostgreSQL/Redis service 完成 un
 lint 暴露 service 直接导入 Redis 和迁移 readiness 的 `rows.Close` 未显式处理；image
 暴露带 provenance/SBOM 的 OCI 顶层 index 没有直接 platform descriptor，原 jq 校验
 错误地只检查第一层。对应修复为 `d4a8273d1`、`1f2935494` 和 `3bcb8a6b8`，并已用该
-失败 run 的真实 OCI archive 只读复验递归校验器。`.1` 保持失败且不可变；新的 `.2`
-在全部远程 job 成功前仍是待验证候选。
+失败 run 的真实 OCI archive 只读复验递归校验器。`.1` 保持失败且不可变。
 
 本机没有可用 Docker daemon，因此没有本地伪造镜像构建或 Trivy 结果。`.1` 的 image
-job 在平台 evidence 步骤停止，不能视为容器扫描成功；生产 ECR digest、provenance、
-签名和 catalog 仍是后续批准门禁。
+job 在平台 evidence 步骤停止，不能视为容器扫描成功。随后 `.2`（源码
+`4378e9b2666cdcaf3020f181f923b51fd897bf93`，远程
+[`29933005376`](https://github.com/LehengChen/sub2api/actions/runs/29933005376)）的 OCI
+构建、递归 platform evidence 和所有非 image job 成功，但 Trivy 发现三个可修复 HIGH：
+`CVE-2026-29181`（OpenTelemetry `1.37.0`，fixed `1.41.0`）以及
+`CVE-2026-46602`/`CVE-2026-46604`（x/image `0.39.0`，fixed `0.43.0`）。依赖修复
+已提交为 `3432dee8e`（stable patch-id
+`fc1e3faf1b9269c995384c1ac161192a75a6f9b7`）；`.3` 仍待完整远程验证。生产 ECR
+digest、provenance、签名和 catalog 仍是后续批准门禁。
 
 ## 身份闭环
 
@@ -102,8 +108,8 @@ job 在平台 evidence 步骤停止，不能视为容器扫描成功；生产 EC
 | FZ-007 | `new` multi-center runtime | 显式角色、migration-only、worker lease 和冷 standby fail-closed |
 | FZ-008 | `new` redirect revalidation | redirect 每一跳重新执行 scheme/host/private-IP policy |
 
-最终 commit、stable patch-id 和 `.1` 失败证据已回填
-[`PATCH_QUEUE.md`](PATCH_QUEUE.md)；`.2` 成功证据仍待远程运行。
+最终 commit、stable patch-id 和 `.1`/`.2` 失败证据已回填
+[`PATCH_QUEUE.md`](PATCH_QUEUE.md)；`.3` 成功证据仍待远程运行。
 
 ## Required Evidence
 

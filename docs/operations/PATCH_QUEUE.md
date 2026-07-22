@@ -28,7 +28,7 @@ digest、release manifest 或生产运行证据。以下处置不能授权 promo
 |---|---|---|---|---|
 | FZ-001 | `reimplement` | HTTPS-only probe + proxy parser；依赖固定出口 TCP/443 | `12ced92fa / b676c2495ff399d2ae5b1fe2b4fdf0fa01a61204` | upstream 提供等价 HTTPS-only 行为并通过出口测试 |
 | FZ-002 | `reimplement` | isolated/offline pricing + bundled fallback | `122dbdac6 / 3cec252950d3b632eb5dc98996e5de0c516dcfe3` | upstream 支持完整离线定价或批准同步通道 |
-| FZ-003 | `recalculate` | Go/pnpm/vulnerability/container scan 每个 release 重算；175a invalid-index retry 和 readiness lint 修复归入 migration gate | `07311f4ad + 1f2935494 / 643fd0768cb6f2ef3b105ffe6d380018df3e273f + 90941563989f468d721fd5d4783058bcf205ab6c` | govulncheck/audit/scan 与例外审查完成后更新结论 |
+| FZ-003 | `recalculate` | Go/pnpm/vulnerability/container scan 每个 release 重算；175a invalid-index retry、readiness lint 和 v163 image CVE 修复归入 migration gate | `07311f4ad + 1f2935494 + 3432dee8e / 643fd0768cb6f2ef3b105ffe6d380018df3e273f + 90941563989f468d721fd5d4783058bcf205ab6c + fc1e3faf1b9269c995384c1ac161192a75a6f9b7` | govulncheck/audit/scan 与例外审查完成后更新结论 |
 | FZ-004 | `new` / `reimplement` | externally-managed catalog、role-only installer、app-only controller、运行源码身份核验 | `c0dd0bf00 + acb9a6649 + 66e45ec8c / 707bb8053c5d4bcb43439c949c90b55138bf8163 + b5b9da903ca2c87852bd0e66afad2e975f311d2d + 78a0ce0d95bd005be4665bc1d39baf03d829c6cd` | 外部流水线撤销或部署模式不再适用 |
 | FZ-005 | `new` / `reimplement` | `/livez`、`/readyz`、bounded drain、ALB path 独立迁移轴 | `eb8e8b91e / fb4273bd6baabe1ed7e4f2600946bd422603cb04` | readiness/drain 契约被 upstream 完整吸收 |
 | FZ-006 | `new` / `reimplement` | Redis OAuth session TTL + atomic consume；Redis adapter 留在 repository 边界 | `10e340093 + d4a8273d1 / a0bedb66b091548f3d24a1573e0aff53997c2e1e + d244d0e6eaa6e7bb3d9e3f591a9ff76184a4932c` | 所有 provider/session 共享状态有 upstream 等价实现 |
@@ -41,7 +41,11 @@ digest、release manifest 或生产运行证据。以下处置不能授权 promo
 （`713c4999354ab33bc01fc863ed9817cde96ea1d3`）的远程 run
 [`29929198055`](https://github.com/LehengChen/sub2api/actions/runs/29929198055) 中 backend、
 frontend、security 和 gate 成功，lint 与 OCI image evidence gate 失败。修复分别固定为
-`d4a8273d1`、`1f2935494` 和 CI-only `3bcb8a6b8`；`.1` 不移动，后续 `.2` 必须完整重跑。
+`d4a8273d1`、`1f2935494` 和 CI-only `3bcb8a6b8`；`.1` 不移动。随后不可变 `.2`
+（`4378e9b2666cdcaf3020f181f923b51fd897bf93`）的 gate、backend、frontend、security、
+lint 和 OCI 递归校验成功，但 Trivy 发现 `go.opentelemetry.io/otel@v1.37.0` 的
+`CVE-2026-29181` 以及 `golang.org/x/image@v0.39.0` 的两个 TIFF CVE，故 summary
+仍失败。最小依赖修复为 `3432dee8e`；`.3` 必须带该修复完整重跑。
 本地验证快照见 [`UPGRADE_V0.1.163.md`](UPGRADE_V0.1.163.md)，因此本节不能授权
 promotion。
 

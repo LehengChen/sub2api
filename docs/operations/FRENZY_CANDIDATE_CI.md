@@ -5,6 +5,13 @@
 2026-07-22（Asia/Tokyo）失败，不能作为完整候选成功或生产发布证据。它是非生产
 candidate gate，不会推送镜像、写 Git ref、部署或修改 AWS/私有 ops。
 
+不可变 `.2` 候选 run
+[`29933005376`](https://github.com/LehengChen/sub2api/actions/runs/29933005376) 的 gate、
+backend、frontend、security、lint 和 OCI platform evidence 已通过，但 Trivy 在 Go
+二进制中发现三个可修复 HIGH（OpenTelemetry `1.37.0` 与 x/image `0.39.0`）；因此
+`.2` 也不构成成功候选。依赖修复后必须使用新的不可变 `.3` 标签重跑，不得移动或
+复用 `.2`。
+
 ## 触发边界
 
 `.github/workflows/frenzy-candidate.yml` 只接受三类入口：
