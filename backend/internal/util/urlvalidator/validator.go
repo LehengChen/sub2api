@@ -35,6 +35,9 @@ func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid url: %s", trimmed)
 	}
+	if parsed.User != nil {
+		return "", errors.New("url must not include userinfo")
+	}
 
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "https" && (!allowInsecureHTTP || scheme != "http") {
@@ -79,6 +82,9 @@ func ValidateURLFormat(raw string, allowInsecureHTTP bool) (string, error) {
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid url: %s", trimmed)
+	}
+	if parsed.User != nil {
+		return "", errors.New("url must not include userinfo")
 	}
 
 	scheme := strings.ToLower(parsed.Scheme)

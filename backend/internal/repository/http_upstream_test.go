@@ -50,6 +50,124 @@ func TestHTTPUpstreamDoCanDisableRedirectsPerRequest(t *testing.T) {
 	require.Zero(t, redirectedCalls.Load())
 }
 
+func TestHTTPUpstreamRedirectCheckerRevalidatesTarget(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				Enabled:           true,
+				UpstreamHosts:     []string{"frenzy.zeabur.app", "private.allowed.example", "127.0.0.1"},
+				AllowPrivateHosts: false,
+				AllowInsecureHTTP: false,
+			},
+		},
+	}
+	upstream := NewHTTPUpstream(cfg)
+	svc, ok := upstream.(*httpUpstreamService)
+	require.True(t, ok)
+	svc.validateResolvedIP = func(host string) error {
+		if host == "private.allowed.example" {
+			return errors.New("resolved ip 10.0.0.8 is not allowed")
+		}
+		return nil
+	}
+
+	source, err := http.NewRequest(http.MethodGet, "https://frenzy.zeabur.app/v1", nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		target      string
+		wantErrPart string
+	}{
+		{name: "exact allowlisted host", target: "https://frenzy.zeabur.app/v2"},
+		{name: "exact allowlisted host with valid HTTPS port", target: "https://frenzy.zeabur.app:443/v2"},
+		{name: "unlisted public host", target: "https://public.example/v2", wantErrPart: "host is not allowed"},
+		{name: "HTTPS to HTTP downgrade", target: "http://frenzy.zeabur.app/v2", wantErrPart: "must preserve the upstream url scheme"},
+		{name: "private literal target", target: "https://127.0.0.1/v2", wantErrPart: "host is not allowed"},
+		{name: "allowlisted host resolving private", target: "https://private.allowed.example/v2", wantErrPart: "resolved ip 10.0.0.8 is not allowed"},
+		{name: "userinfo is rejected", target: "https://user:password@frenzy.zeabur.app/v2", wantErrPart: "must not include userinfo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, err := http.NewRequest(http.MethodGet, tt.target, nil)
+			require.NoError(t, err)
+
+			err = svc.redirectChecker(target, []*http.Request{source})
+			if tt.wantErrPart == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErrPart)
+		})
+	}
+}
+
+func TestHTTPUpstreamRedirectCheckerRechecksDNSOnEveryHop(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				Enabled:           true,
+				UpstreamHosts:     []string{"frenzy.zeabur.app"},
+				AllowPrivateHosts: false,
+			},
+		},
+	}
+	upstream := NewHTTPUpstream(cfg)
+	svc, ok := upstream.(*httpUpstreamService)
+	require.True(t, ok)
+
+	var calls atomic.Int64
+	svc.validateResolvedIP = func(string) error {
+		if calls.Add(1) == 1 {
+			return nil
+		}
+		return errors.New("resolved ip 10.0.0.9 is not allowed")
+	}
+
+	source, err := http.NewRequest(http.MethodGet, "https://frenzy.zeabur.app/start", nil)
+	require.NoError(t, err)
+	firstHop, err := http.NewRequest(http.MethodGet, "https://frenzy.zeabur.app/first", nil)
+	require.NoError(t, err)
+	secondHop, err := http.NewRequest(http.MethodGet, "https://frenzy.zeabur.app/second", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.redirectChecker(firstHop, []*http.Request{source}))
+	err = svc.redirectChecker(secondHop, []*http.Request{source, firstHop})
+	require.ErrorContains(t, err, "resolved ip 10.0.0.9 is not allowed")
+	require.EqualValues(t, 2, calls.Load())
+}
+
+func TestHTTPUpstreamAllowlistAlwaysInstallsRedirectChecker(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				Enabled:           true,
+				UpstreamHosts:     []string{"frenzy.zeabur.app"},
+				AllowPrivateHosts: true,
+			},
+		},
+	}
+	upstream := NewHTTPUpstream(cfg)
+	svc, ok := upstream.(*httpUpstreamService)
+	require.True(t, ok)
+
+	entry, err := svc.getClientEntry("", 1, 1, service.HTTPUpstreamProfileDefault, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, entry.client.CheckRedirect)
+
+	tlsEntry, err := svc.getClientEntryWithTLS("", 2, 1, &tlsfingerprint.Profile{Name: "test"}, service.HTTPUpstreamProfileDefault, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, tlsEntry.client.CheckRedirect)
+}
+
+func TestHTTPUpstreamRedirectCheckerPreservesRedirectLimit(t *testing.T) {
+	svc := &httpUpstreamService{}
+	via := make([]*http.Request, 10)
+	err := svc.redirectChecker(&http.Request{}, via)
+	require.ErrorContains(t, err, "stopped after 10 redirects")
+}
+
 func TestHTTPUpstreamDoWithTLSPlainHTTPUsesConfiguredHTTPProxy(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
