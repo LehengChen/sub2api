@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	"github.com/Wei-Shaw/sub2api/internal/server/routes"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -176,6 +178,26 @@ func TestReadinessResponseDoesNotExposeProbeErrors(t *testing.T) {
 	response := assertStatus(t, router, "/readyz", http.StatusServiceUnavailable)
 	require.False(t, strings.Contains(response.Body.String(), "secret"))
 	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+}
+
+func TestReadinessRejectsStandbyAndLostWorkerFence(t *testing.T) {
+	success := func(context.Context) error { return nil }
+	standby := newHealthService(time.Second, time.Second, success, success, success)
+	standby.runtimeControl = runtimecontrol.Default()
+	standby.runtimeControl.Role = runtimecontrol.RoleStandby
+	standby.MarkInitialized()
+	report, ready := standby.Readiness(context.Background())
+	require.False(t, ready)
+	require.Equal(t, "failed", report.Checks["role"])
+
+	active := newHealthService(time.Second, time.Second, success, success, success)
+	active.runtimeControl = runtimecontrol.Default()
+	active.runtimeControl.Role = runtimecontrol.RoleActive
+	active.workerFence = &service.WorkerFence{}
+	active.MarkInitialized()
+	report, ready = active.Readiness(context.Background())
+	require.False(t, ready)
+	require.Equal(t, "failed", report.Checks["worker_fence"])
 }
 
 func assertStatus(t *testing.T, handler http.Handler, path string, want int) *httptest.ResponseRecorder {
