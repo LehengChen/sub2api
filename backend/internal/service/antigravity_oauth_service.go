@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,15 +12,27 @@ import (
 )
 
 type AntigravityOAuthService struct {
-	sessionStore *antigravity.SessionStore
+	sessionStore OAuthSessionStore
 	proxyRepo    ProxyRepository
 }
 
 func NewAntigravityOAuthService(proxyRepo ProxyRepository) *AntigravityOAuthService {
 	return &AntigravityOAuthService{
-		sessionStore: antigravity.NewSessionStore(),
+		sessionStore: NewMemoryOAuthSessionStore(),
 		proxyRepo:    proxyRepo,
 	}
+}
+
+// NewAntigravityOAuthServiceWithSessionStore creates an Antigravity OAuth
+// service using a caller-provided store.
+func NewAntigravityOAuthServiceWithSessionStore(proxyRepo ProxyRepository, sessionStore OAuthSessionStore) (*AntigravityOAuthService, error) {
+	if sessionStore == nil {
+		return nil, errors.New("oauth session store is required")
+	}
+	return &AntigravityOAuthService{
+		sessionStore: sessionStore,
+		proxyRepo:    proxyRepo,
+	}, nil
 }
 
 // AntigravityAuthURLResult is the result of generating an authorization URL
@@ -60,7 +73,9 @@ func (s *AntigravityOAuthService) GenerateAuthURL(ctx context.Context, proxyID *
 		ProxyURL:     proxyURL,
 		CreatedAt:    time.Now(),
 	}
-	s.sessionStore.Set(sessionID, session)
+	if err := s.sessionStore.Save(ctx, OAuthSessionProviderAntigravity, sessionID, session, antigravity.SessionTTL); err != nil {
+		return nil, fmt.Errorf("oauth session store unavailable")
+	}
 
 	codeChallenge := antigravity.GenerateCodeChallenge(codeVerifier)
 	authURL := antigravity.BuildAuthorizationURL(state, codeChallenge)
@@ -96,9 +111,15 @@ type AntigravityTokenInfo struct {
 
 // ExchangeCode 用 authorization code 交换 token
 func (s *AntigravityOAuthService) ExchangeCode(ctx context.Context, input *AntigravityExchangeCodeInput) (*AntigravityTokenInfo, error) {
-	session, ok := s.sessionStore.Get(input.SessionID)
-	if !ok {
+	if input == nil {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	var session antigravity.OAuthSession
+	if err := s.sessionStore.Consume(ctx, OAuthSessionProviderAntigravity, input.SessionID, &session); errors.Is(err, ErrOAuthSessionNotFound) {
 		return nil, fmt.Errorf("session 不存在或已过期")
+	} else if err != nil {
+		return nil, fmt.Errorf("oauth session store unavailable")
 	}
 
 	if strings.TrimSpace(input.State) == "" || input.State != session.State {
@@ -124,9 +145,6 @@ func (s *AntigravityOAuthService) ExchangeCode(ctx context.Context, input *Antig
 	if err != nil {
 		return nil, fmt.Errorf("token 交换失败: %w", err)
 	}
-
-	// 删除 session
-	s.sessionStore.Delete(input.SessionID)
 
 	// 计算过期时间（减去 5 分钟安全窗口）
 	expiresAt := time.Now().Unix() + tokenResp.ExpiresIn - 300
@@ -481,5 +499,5 @@ func (s *AntigravityOAuthService) BuildAccountCredentials(tokenInfo *Antigravity
 
 // Stop 停止服务
 func (s *AntigravityOAuthService) Stop() {
-	s.sessionStore.Stop()
+	_ = s.sessionStore.Close()
 }
