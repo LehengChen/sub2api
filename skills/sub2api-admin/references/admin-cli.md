@@ -133,10 +133,10 @@ node scripts/sub2api-admin.js proxies accounts 4
 ```
 
 Proxy command output is intentionally allowlisted. It includes identity, endpoint,
-status, health, and account-count fields, but never prints `username` or `password`
-values. Instead it includes the boolean fields `auth_present` and
-`password_present`. This remains true for `proxies all`, `get`, and `create` even
-when the server returns credential fields.
+status, structured health, and account-count fields, but never prints `username`,
+`password`, free-form health messages, or account notes. Instead it includes the
+boolean fields `auth_present` and `password_present`. This remains true for
+`proxies all`, `get`, and `create` even when the server returns credential fields.
 
 Create a proxy with a file or inline JSON. A stable, non-empty idempotency key is
 mandatory and is sent exactly as the `Idempotency-Key` request header. Reuse the
