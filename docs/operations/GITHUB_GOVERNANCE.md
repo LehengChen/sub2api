@@ -12,12 +12,12 @@
 - upstream 专用 workflow 必须有 `github.repository == 'Wei-Shaw/sub2api'` 身份 guard。
 - workflow/action 版本、安全例外和 required checks 定期复核。
 
-## 2026-07-13 实际观察
+## 实际观察（GitHub 2026-07-13；候选源码补充于 2026-07-22）
 
 - GitHub 默认分支为 `main`；本次整理后已包含 `AGENTS.md`、运维入口、CI 安全门禁和维护模板，新 clone 可以直接接手。
 - Actions 权限为 enabled；本次整理 push 后，API 已回读到 4 个 active workflows。历史 deployed application tag 的 check-run 仍为 0，因此不能追溯性地声称该版本经过 fork CI；新的 candidate 必须引用实际成功 run。
 - `main`、当前 release 没有 branch protection，也没有 repository ruleset。
-- upstream `release.yml` 仍有 `workflow_dispatch`、`contents: write` 和发布逻辑。本次维护变更已给所有 job（包括实际 push 默认分支的 job）加入 upstream repository 身份 guard，并已进入 fork `main`。Frenzy 仍需要独立 build-only workflow。
+- upstream `release.yml` 仍有 `workflow_dispatch`、`contents: write` 和发布逻辑。本次维护变更已给所有 job（包括实际 push 默认分支的 job）加入 upstream repository 身份 guard，并已进入 fork `main`。Frenzy 独立 build-only workflow 已加入当前候选分支；尚未有成功 run，不能把它写成已验证的生产证据。
 - 本次维护变更删除了三个已过期且当前 audit 不再命中的例外，把剩余 xlsx 例外 owner 改为仓库责任人，并让 validator 全局拒绝过期/占位 owner。两个 xlsx 高危例外仍有效至 2026-10-06，必须在到期前升级、移除或重新获得有依据的审批。
 
 这些是风险登记，不是本轮文档提交自动修复的外部状态。
@@ -48,6 +48,13 @@ git show origin/main:AGENTS.md >/dev/null
 7. 只读权限，不 push branch、不修改 `VERSION` 后写回默认分支。
 
 fork CI 是可重复证据，不替代 migration 副本演练、固定代理/分组/计费 E2E 或生产 canary。
+
+Frenzy 候选使用独立的 [`FRENZY_CANDIDATE_CI.md`](FRENZY_CANDIDATE_CI.md) workflow。
+它只接受 `workflow_dispatch`、`integration/*`/`release/*` 头分支 PR 和
+`frenzy/candidate/**` tag；所有 job 只 checkout PR head 的完整 SHA，固定写入 VERSION、
+COMMIT 和 UTC DATE。Buildx 只产生本地 `linux/amd64` OCI artifact，并请求 provenance
+与 SBOM；不 push registry。没有 registry digest 或签名时，evidence 必须明确标记
+`missing`，不能用 archive SHA 或绿色 check 冒充生产证明。
 
 ## 启用/调整后的验收
 
