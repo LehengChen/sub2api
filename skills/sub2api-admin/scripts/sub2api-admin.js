@@ -46,6 +46,11 @@ function usage() {
   sub2api-admin.js accounts import-json --file <path> --template-name <name> [--skip-name <name>] [--dry-run]
   sub2api-admin.js groups all
   sub2api-admin.js proxies all
+  sub2api-admin.js proxies get <id>
+  sub2api-admin.js proxies create --json '{...}' | --file proxy.json --idempotency-key KEY
+  sub2api-admin.js proxies test <id>
+  sub2api-admin.js proxies accounts <id>
+  sub2api-admin.js proxies delete <id>
   sub2api-admin.js redeem-codes list [--page-size 200] [--page N] [--type balance] [--status unused] [--search TEXT] [--sort-by id] [--sort-order desc]
   sub2api-admin.js redeem-codes export [--file redeem-codes.csv] [list filters...]
   sub2api-admin.js redeem-codes get <id>
@@ -58,7 +63,7 @@ function usage() {
   sub2api-admin.js redeem-codes stats
   sub2api-admin.js error-rules list|get|create|update|delete|toggle ...
   sub2api-admin.js tls-profiles list|get|create|update|delete ...
-  sub2api-admin.js api <GET|POST|PUT|DELETE> <admin-path> [--json '{...}' | --file payload.json]
+  sub2api-admin.js api <GET|POST|PUT|DELETE> <admin-path> [--json '{...}' | --file payload.json] [--idempotency-key KEY]
 `);
 }
 
@@ -274,8 +279,120 @@ function redeemCodesQuery(flags) {
 }
 
 function idempotencyHeaders(flags) {
-  if (!flags["idempotency-key"]) return {};
-  return { "Idempotency-Key": flags["idempotency-key"] };
+  if (flags["idempotency-key"] === undefined) return {};
+  return requiredIdempotencyHeaders(flags, "request");
+}
+
+function requiredIdempotencyHeaders(flags, command) {
+  const key = flags["idempotency-key"];
+  if (typeof key !== "string" || key.length === 0) {
+    throw new Error(`${command} requires a non-empty --idempotency-key`);
+  }
+  if (key.trim() !== key || /[^\x20-\x7e]/.test(key) || key.length > 255) {
+    throw new Error(`${command} --idempotency-key must be a stable visible-ASCII single-line value up to 255 characters`);
+  }
+  return { "Idempotency-Key": key };
+}
+
+// Keep proxy command output safe even when an admin endpoint returns credentials.
+// These are the fields needed to identify and operate an exit; credential values
+// are intentionally reduced to presence booleans.
+const PROXY_OUTPUT_FIELDS = [
+  "id",
+  "name",
+  "protocol",
+  "host",
+  "port",
+  "status",
+  "created_at",
+  "updated_at",
+  "expires_at",
+  "fallback_mode",
+  "backup_proxy_id",
+  "expiry_warn_days",
+  "account_count",
+  "latency_ms",
+  "latency_status",
+  "latency_message",
+  "ip_address",
+  "country",
+  "country_code",
+  "region",
+  "city",
+  "quality_status",
+  "quality_score",
+  "quality_grade",
+  "quality_summary",
+  "quality_checked",
+];
+
+function hasCredential(value) {
+  return value !== undefined && value !== null && String(value).length > 0;
+}
+
+function redactProxy(proxy) {
+  if (!proxy || typeof proxy !== "object" || Array.isArray(proxy)) {
+    throw new Error("proxy response must be an object");
+  }
+  const output = {};
+  for (const field of PROXY_OUTPUT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(proxy, field)) {
+      output[field] = proxy[field];
+    }
+  }
+  output.auth_present = hasCredential(proxy.username) || hasCredential(proxy.password);
+  output.password_present = hasCredential(proxy.password);
+  return output;
+}
+
+function redactProxyCollection(data) {
+  if (Array.isArray(data)) return data.map(redactProxy);
+  if (data && typeof data === "object" && Array.isArray(data.items)) {
+    const metadataFields = ["total", "page", "page_size", "pages", "has_next", "has_prev"];
+    return {
+      ...Object.fromEntries(
+        metadataFields
+          .filter((field) => Object.prototype.hasOwnProperty.call(data, field))
+          .map((field) => [field, data[field]]),
+      ),
+      items: data.items.map(redactProxy),
+    };
+  }
+  return redactProxy(data);
+}
+
+const PROXY_TEST_OUTPUT_FIELDS = [
+  "success",
+  "message",
+  "latency_ms",
+  "ip_address",
+  "city",
+  "region",
+  "country",
+  "country_code",
+];
+
+function redactProxyTestResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("proxy test response must be an object");
+  }
+  return Object.fromEntries(
+    PROXY_TEST_OUTPUT_FIELDS
+      .filter((field) => Object.prototype.hasOwnProperty.call(result, field))
+      .map((field) => [field, result[field]]),
+  );
+}
+
+const PROXY_ACCOUNT_OUTPUT_FIELDS = ["id", "name", "platform", "type", "notes"];
+
+function redactProxyAccounts(data) {
+  const items = Array.isArray(data) ? data : data && Array.isArray(data.items) ? data.items : null;
+  if (!items) throw new Error("proxy accounts response must contain an array");
+  return items.map((account) => Object.fromEntries(
+    PROXY_ACCOUNT_OUTPUT_FIELDS
+      .filter((field) => Object.prototype.hasOwnProperty.call(account, field))
+      .map((field) => [field, account[field]]),
+  ));
 }
 
 function printJson(data) {
@@ -601,7 +718,41 @@ async function commandGroups(args) {
 async function commandProxies(args) {
   const sub = args.positional[1];
   if (sub === "all") {
-    printJson(await adminRequest("GET", "/admin/proxies/all"));
+    printJson(redactProxyCollection(await adminRequest("GET", "/admin/proxies/all")));
+    return;
+  }
+  if (sub === "get") {
+    const id = args.positional[2];
+    if (!id) throw new Error("proxies get requires <id>");
+    printJson(redactProxy(await adminRequest("GET", `/admin/proxies/${id}`)));
+    return;
+  }
+  if (sub === "create") {
+    const payload = readJsonPayload(args.flags);
+    printJson(redactProxy(await adminRequestWithHeaders(
+      "POST",
+      "/admin/proxies",
+      payload,
+      requiredIdempotencyHeaders(args.flags, "proxies create"),
+    )));
+    return;
+  }
+  if (sub === "test") {
+    const id = args.positional[2];
+    if (!id) throw new Error("proxies test requires <id>");
+    printJson(redactProxyTestResult(await adminRequest("POST", `/admin/proxies/${id}/test`)));
+    return;
+  }
+  if (sub === "accounts") {
+    const id = args.positional[2];
+    if (!id) throw new Error("proxies accounts requires <id>");
+    printJson(redactProxyAccounts(await adminRequest("GET", `/admin/proxies/${id}/accounts`)));
+    return;
+  }
+  if (sub === "delete") {
+    const id = args.positional[2];
+    if (!id) throw new Error("proxies delete requires <id>");
+    printJson(await adminRequest("DELETE", `/admin/proxies/${id}`));
     return;
   }
   throw new Error(`unknown proxies subcommand: ${sub || "(missing)"}`);
@@ -712,7 +863,12 @@ async function commandApi(args) {
   const pathname = args.positional[2];
   if (!method || !pathname) throw new Error("api requires <GET|POST|PUT|DELETE> <admin-path>");
   const body = readJsonPayload(args.flags, { required: false });
-  printJson(await adminRequest(method.toUpperCase(), pathname, body));
+  printJson(await adminRequestWithHeaders(
+    method.toUpperCase(),
+    pathname,
+    body,
+    idempotencyHeaders(args.flags),
+  ));
 }
 
 async function main() {
@@ -753,7 +909,23 @@ async function main() {
   throw new Error(`unknown command: ${root}`);
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  PROXY_OUTPUT_FIELDS,
+  apiRequest,
+  commandApi,
+  commandProxies,
+  idempotencyHeaders,
+  main,
+  redactProxy,
+  redactProxyAccounts,
+  redactProxyCollection,
+  redactProxyTestResult,
+  requiredIdempotencyHeaders,
+};
