@@ -36,8 +36,18 @@ job 在平台 evidence 步骤停止，不能视为容器扫描成功。随后 `.
 backend unit/integration/race 全部成功，但 Ent/Wire clean generation 因 readonly 模式
 缺少 `github.com/google/subcommands` checksum 失败；本地已补齐该显式间接依赖并验证
 两次生成幂等，修复提交为 `b7c256cf0`（stable patch-id
-`a251baa3cc5b992970ab182f4bbd17b91bb365da`）。`.4` 仍待完整远程验证。生产 ECR
-digest、provenance、签名和 catalog 仍是后续批准门禁。
+`a251baa3cc5b992970ab182f4bbd17b91bb365da`）。不可变 `.4`（源码
+`c45bbd468ba983d2306c02744a20920adfe5a109`）的远程 run
+[`29936467514`](https://github.com/LehengChen/sub2api/actions/runs/29936467514) 于
+2026-07-23 01:06:04 至 01:19:41（Asia/Tokyo）完成，gate、backend、security、image、
+frontend、lint 和 summary 全部成功；Trivy HIGH/CRITICAL 计数为 0，真实 PostgreSQL/
+Redis integration、必需测试 no-skip、目标 race 和 Ent/Wire clean generation 均通过。
+
+`.4` evidence 明确为 `production=false`、`linux/amd64`，本地 OCI archive SHA-256 为
+`d0f5cda227d69241e85c5442bc68a73ac2dd65e0071d5a54962afcd1ef7f2681`，唯一可运行
+manifest digest 为 `sha256:81a8c5b8eb7be7bac64cf7e56eaf8e748a02d202b458bdf3699df502c0d9f6e1`。
+registry digest 和签名仍明确为 missing；生产 ECR digest、provenance/签名、catalog、
+migration rehearsal 和真实 synthetic 仍是后续批准门禁。
 
 ## 身份闭环
 
@@ -112,8 +122,9 @@ digest、provenance、签名和 catalog 仍是后续批准门禁。
 | FZ-007 | `new` multi-center runtime | 显式角色、migration-only、worker lease 和冷 standby fail-closed |
 | FZ-008 | `new` redirect revalidation | redirect 每一跳重新执行 scheme/host/private-IP policy |
 
-最终 commit、stable patch-id 和 `.1`/`.2`/`.3` 失败证据已回填
-[`PATCH_QUEUE.md`](PATCH_QUEUE.md)；`.4` 成功证据仍待远程运行。
+最终 commit、stable patch-id、`.1`/`.2`/`.3` 失败证据和 `.4` 成功证据已回填
+[`PATCH_QUEUE.md`](PATCH_QUEUE.md)。这完成 candidate CI 门禁，不授权 production
+promotion。
 
 ## Required Evidence
 

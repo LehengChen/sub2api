@@ -47,7 +47,11 @@ lint 和 OCI 递归校验成功，但 Trivy 发现 `go.opentelemetry.io/otel@v1.
 `CVE-2026-29181` 以及 `golang.org/x/image@v0.39.0` 的两个 TIFF CVE，故 summary
 仍失败。最小依赖修复为 `3432dee8e`；`.3` 带修复重跑后所有运行门禁成功，但
 readonly Wire generation 缺少 `github.com/google/subcommands` checksum，summary 仍失败。
-该生成依赖修复为 `b7c256cf0`；`.4` 必须带该修复完整重跑。
+该生成依赖修复为 `b7c256cf0`。不可变 `.4`（源码
+`c45bbd468ba983d2306c02744a20920adfe5a109`）的远程 run
+[`29936467514`](https://github.com/LehengChen/sub2api/actions/runs/29936467514) 已通过全部
+candidate job 和 summary；它仍是非生产 evidence，不提供 approved ECR digest、签名、
+release manifest、migration rehearsal 或生产 synthetic，因此不能单独授权 promotion。
 本地验证快照见 [`UPGRADE_V0.1.163.md`](UPGRADE_V0.1.163.md)，因此本节不能授权
 promotion。
 

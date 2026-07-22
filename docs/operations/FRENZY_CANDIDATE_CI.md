@@ -17,6 +17,12 @@ backend、frontend、security、lint 和 OCI platform evidence 已通过，但 T
 `github.com/google/subcommands` checksum。补齐显式间接依赖后必须使用新的不可变 `.4`
 标签重跑，不能移动或复用 `.3`。
 
+不可变 `.4` 候选（源码 `c45bbd468ba983d2306c02744a20920adfe5a109`）的远程 run
+[`29936467514`](https://github.com/LehengChen/sub2api/actions/runs/29936467514) 于
+2026-07-23 01:06:04 至 01:19:41（Asia/Tokyo）完成，gate、backend、security、image、
+frontend、lint 和 summary 全部成功。这只证明本页定义的非生产 candidate gate；报告
+仍明确标记 registry digest 和签名缺失，不能据此部署或 promotion。
+
 ## 触发边界
 
 `.github/workflows/frenzy-candidate.yml` 只接受三类入口：
