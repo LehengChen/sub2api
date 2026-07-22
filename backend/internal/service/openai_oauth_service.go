@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -14,7 +15,7 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
-	sessionStore         *openai.SessionStore
+	sessionStore         OAuthSessionStore
 	proxyRepo            ProxyRepository
 	oauthClient          OpenAIOAuthClient
 	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
@@ -23,10 +24,23 @@ type OpenAIOAuthService struct {
 // NewOpenAIOAuthService creates a new OpenAI OAuth service
 func NewOpenAIOAuthService(proxyRepo ProxyRepository, oauthClient OpenAIOAuthClient) *OpenAIOAuthService {
 	return &OpenAIOAuthService{
-		sessionStore: openai.NewSessionStore(),
+		sessionStore: NewMemoryOAuthSessionStore(),
 		proxyRepo:    proxyRepo,
 		oauthClient:  oauthClient,
 	}
+}
+
+// NewOpenAIOAuthServiceWithSessionStore creates an OpenAI OAuth service using
+// a caller-provided store. Multi-instance deployments must inject a shared store.
+func NewOpenAIOAuthServiceWithSessionStore(proxyRepo ProxyRepository, oauthClient OpenAIOAuthClient, sessionStore OAuthSessionStore) (*OpenAIOAuthService, error) {
+	if sessionStore == nil {
+		return nil, errors.New("oauth session store is required")
+	}
+	return &OpenAIOAuthService{
+		sessionStore: sessionStore,
+		proxyRepo:    proxyRepo,
+		oauthClient:  oauthClient,
+	}, nil
 }
 
 // SetPrivacyClientFactory 注入 ImpersonateChrome 客户端工厂，
@@ -90,7 +104,9 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		ProxyURL:     proxyURL,
 		CreatedAt:    time.Now(),
 	}
-	s.sessionStore.Set(sessionID, session)
+	if err := s.sessionStore.Save(ctx, OAuthSessionProviderOpenAI, sessionID, session, openai.SessionTTL); err != nil {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "oauth session store unavailable")
+	}
 
 	// Build authorization URL
 	authURL := openai.BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, normalizedPlatform)
@@ -131,10 +147,15 @@ type OpenAITokenInfo struct {
 
 // ExchangeCode exchanges authorization code for tokens
 func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExchangeCodeInput) (*OpenAITokenInfo, error) {
-	// Get session
-	session, ok := s.sessionStore.Get(input.SessionID)
-	if !ok {
+	if input == nil {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_INPUT", "input is required")
+	}
+
+	var session openai.OAuthSession
+	if err := s.sessionStore.Consume(ctx, OAuthSessionProviderOpenAI, input.SessionID, &session); errors.Is(err, ErrOAuthSessionNotFound) {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_NOT_FOUND", "session not found or expired")
+	} else if err != nil {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "oauth session store unavailable")
 	}
 	if input.State == "" {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_STATE_REQUIRED", "oauth state is required")
@@ -181,9 +202,6 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 			userInfo = claims.GetUserInfo()
 		}
 	}
-
-	// Delete session after successful exchange
-	s.sessionStore.Delete(input.SessionID)
 
 	tokenInfo := &OpenAITokenInfo{
 		AccessToken:  tokenResp.AccessToken,
@@ -416,7 +434,7 @@ func (s *OpenAIOAuthService) BuildAccountCredentials(tokenInfo *OpenAITokenInfo)
 
 // Stop stops the session store cleanup goroutine
 func (s *OpenAIOAuthService) Stop() {
-	s.sessionStore.Stop()
+	_ = s.sessionStore.Close()
 }
 
 func normalizeOpenAIOAuthPlatform(platform string) string {

@@ -1417,12 +1417,14 @@ func TestGeminiOAuthService_ExchangeCode_InvalidState(t *testing.T) {
 	defer svc.Stop()
 
 	// 手动创建 session（必须设置 CreatedAt，否则会因 TTL 过期被拒绝）
-	svc.sessionStore.Set("test-session", &geminicli.OAuthSession{
+	if err := svc.sessionStore.Save(context.Background(), OAuthSessionProviderGemini, "test-session", &geminicli.OAuthSession{
 		State:        "correct-state",
 		CodeVerifier: "verifier",
 		OAuthType:    "ai_studio",
 		CreatedAt:    time.Now(),
-	})
+	}, geminicli.SessionTTL); err != nil {
+		t.Fatalf("保存 session 失败: %v", err)
+	}
 
 	_, err := svc.ExchangeCode(context.Background(), &GeminiExchangeCodeInput{
 		SessionID: "test-session",
@@ -1435,6 +1437,10 @@ func TestGeminiOAuthService_ExchangeCode_InvalidState(t *testing.T) {
 	if !strings.Contains(err.Error(), "invalid state") {
 		t.Fatalf("错误信息不匹配: got=%q", err.Error())
 	}
+	var consumed geminicli.OAuthSession
+	if err := svc.sessionStore.Load(context.Background(), OAuthSessionProviderGemini, "test-session", &consumed); err != ErrOAuthSessionNotFound {
+		t.Fatalf("state 校验失败后 session 应被消费: %v", err)
+	}
 }
 
 func TestGeminiOAuthService_ExchangeCode_EmptyState(t *testing.T) {
@@ -1443,11 +1449,13 @@ func TestGeminiOAuthService_ExchangeCode_EmptyState(t *testing.T) {
 	svc := NewGeminiOAuthService(nil, nil, nil, nil, &config.Config{})
 	defer svc.Stop()
 
-	svc.sessionStore.Set("test-session", &geminicli.OAuthSession{
+	if err := svc.sessionStore.Save(context.Background(), OAuthSessionProviderGemini, "test-session", &geminicli.OAuthSession{
 		State:        "correct-state",
 		CodeVerifier: "verifier",
 		CreatedAt:    time.Now(),
-	})
+	}, geminicli.SessionTTL); err != nil {
+		t.Fatalf("保存 session 失败: %v", err)
+	}
 
 	_, err := svc.ExchangeCode(context.Background(), &GeminiExchangeCodeInput{
 		SessionID: "test-session",

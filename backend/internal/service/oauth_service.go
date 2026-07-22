@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -41,7 +42,7 @@ type ClaudeOAuthClient interface {
 
 // OAuthService handles OAuth authentication flows
 type OAuthService struct {
-	sessionStore *oauth.SessionStore
+	sessionStore OAuthSessionStore
 	proxyRepo    ProxyRepository
 	oauthClient  ClaudeOAuthClient
 }
@@ -49,10 +50,23 @@ type OAuthService struct {
 // NewOAuthService creates a new OAuth service
 func NewOAuthService(proxyRepo ProxyRepository, oauthClient ClaudeOAuthClient) *OAuthService {
 	return &OAuthService{
-		sessionStore: oauth.NewSessionStore(),
+		sessionStore: NewMemoryOAuthSessionStore(),
 		proxyRepo:    proxyRepo,
 		oauthClient:  oauthClient,
 	}
+}
+
+// NewOAuthServiceWithSessionStore creates a Claude OAuth service using a
+// caller-provided store. Multi-instance deployments must inject a shared store.
+func NewOAuthServiceWithSessionStore(proxyRepo ProxyRepository, oauthClient ClaudeOAuthClient, sessionStore OAuthSessionStore) (*OAuthService, error) {
+	if sessionStore == nil {
+		return nil, errors.New("oauth session store is required")
+	}
+	return &OAuthService{
+		sessionStore: sessionStore,
+		proxyRepo:    proxyRepo,
+		oauthClient:  oauthClient,
+	}, nil
 }
 
 // GenerateAuthURLResult contains the authorization URL and session info
@@ -109,7 +123,9 @@ func (s *OAuthService) generateAuthURLWithScope(ctx context.Context, scope strin
 		ProxyURL:     proxyURL,
 		CreatedAt:    time.Now(),
 	}
-	s.sessionStore.Set(sessionID, session)
+	if err := s.sessionStore.Save(ctx, OAuthSessionProviderClaude, sessionID, session, oauth.SessionTTL); err != nil {
+		return nil, fmt.Errorf("oauth session store unavailable")
+	}
 
 	// Build authorization URL
 	authURL := oauth.BuildAuthorizationURL(state, codeChallenge, scope)
@@ -142,10 +158,15 @@ type TokenInfo struct {
 
 // ExchangeCode exchanges authorization code for tokens
 func (s *OAuthService) ExchangeCode(ctx context.Context, input *ExchangeCodeInput) (*TokenInfo, error) {
-	// Get session
-	session, ok := s.sessionStore.Get(input.SessionID)
-	if !ok {
+	if input == nil {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	var session oauth.OAuthSession
+	if err := s.sessionStore.Consume(ctx, OAuthSessionProviderClaude, input.SessionID, &session); errors.Is(err, ErrOAuthSessionNotFound) {
 		return nil, fmt.Errorf("session not found or expired")
+	} else if err != nil {
+		return nil, fmt.Errorf("oauth session store unavailable")
 	}
 
 	// Get proxy URL
@@ -165,9 +186,6 @@ func (s *OAuthService) ExchangeCode(ctx context.Context, input *ExchangeCodeInpu
 	if err != nil {
 		return nil, err
 	}
-
-	// Delete session after successful exchange
-	s.sessionStore.Delete(input.SessionID)
 
 	return tokenInfo, nil
 }
@@ -319,5 +337,5 @@ func (s *OAuthService) RefreshAccountToken(ctx context.Context, account *Account
 
 // Stop stops the session store cleanup goroutine
 func (s *OAuthService) Stop() {
-	s.sessionStore.Stop()
+	_ = s.sessionStore.Close()
 }
