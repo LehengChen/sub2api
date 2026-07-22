@@ -144,9 +144,10 @@ type openAIHTTP2FallbackState struct {
 // 7. 代理变更时清空旧连接池，避免复用错误代理
 // 8. 账号并发数与连接池上限对应（账号隔离策略下）
 type httpUpstreamService struct {
-	cfg     *config.Config                  // 全局配置
-	mu      sync.RWMutex                    // 保护 clients map 的读写锁
-	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	cfg                *config.Config                  // 全局配置
+	mu                 sync.RWMutex                    // 保护 clients map 的读写锁
+	clients            map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	validateResolvedIP func(string) error
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
 }
@@ -161,8 +162,9 @@ type httpUpstreamService struct {
 //   - service.HTTPUpstream 接口实现
 func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
 	return &httpUpstreamService{
-		cfg:     cfg,
-		clients: make(map[string]*upstreamClientEntry),
+		cfg:                cfg,
+		clients:            make(map[string]*upstreamClientEntry),
+		validateResolvedIP: urlvalidator.ValidateResolvedIP,
 	}
 }
 
@@ -536,7 +538,7 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	}
 
 	client := &http.Client{Transport: transport}
-	if s.shouldValidateResolvedIP() {
+	if s.shouldValidateRedirect() {
 		client.CheckRedirect = s.redirectChecker
 	}
 
@@ -558,13 +560,17 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 }
 
 func (s *httpUpstreamService) shouldValidateResolvedIP() bool {
-	if s.cfg == nil {
+	if s == nil || s.cfg == nil {
 		return false
 	}
 	if !s.cfg.Security.URLAllowlist.Enabled {
 		return false
 	}
 	return !s.cfg.Security.URLAllowlist.AllowPrivateHosts
+}
+
+func (s *httpUpstreamService) shouldValidateRedirect() bool {
+	return s != nil && s.cfg != nil && s.cfg.Security.URLAllowlist.Enabled
 }
 
 func (s *httpUpstreamService) validateRequestHost(req *http.Request) error {
@@ -578,7 +584,11 @@ func (s *httpUpstreamService) validateRequestHost(req *http.Request) error {
 	if host == "" {
 		return errors.New("request host is empty")
 	}
-	if err := urlvalidator.ValidateResolvedIP(host); err != nil {
+	validateResolvedIP := urlvalidator.ValidateResolvedIP
+	if s.validateResolvedIP != nil {
+		validateResolvedIP = s.validateResolvedIP
+	}
+	if err := validateResolvedIP(host); err != nil {
 		return err
 	}
 	return nil
@@ -587,6 +597,25 @@ func (s *httpUpstreamService) validateRequestHost(req *http.Request) error {
 func (s *httpUpstreamService) redirectChecker(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
+	}
+	if req == nil || req.URL == nil {
+		return errors.New("redirect url is missing")
+	}
+	if len(via) == 0 || via[0] == nil || via[0].URL == nil {
+		return errors.New("redirect source url is missing")
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.URL.Scheme), strings.TrimSpace(via[0].URL.Scheme)) {
+		return errors.New("redirect must preserve the upstream url scheme")
+	}
+	if s.shouldValidateRedirect() {
+		_, err := urlvalidator.ValidateHTTPURL(req.URL.String(), s.cfg.Security.URLAllowlist.AllowInsecureHTTP, urlvalidator.ValidationOptions{
+			AllowedHosts:     s.cfg.Security.URLAllowlist.UpstreamHosts,
+			RequireAllowlist: true,
+			AllowPrivate:     s.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		})
+		if err != nil {
+			return fmt.Errorf("redirect url is not allowed: %w", err)
+		}
 	}
 	return s.validateRequestHost(req)
 }
@@ -688,7 +717,7 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 		return nil, fmt.Errorf("build transport: %w", err)
 	}
 	client := &http.Client{Transport: transport}
-	if s.shouldValidateResolvedIP() {
+	if s.shouldValidateRedirect() {
 		client.CheckRedirect = s.redirectChecker
 	}
 	entry := &upstreamClientEntry{
