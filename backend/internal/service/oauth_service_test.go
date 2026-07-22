@@ -159,9 +159,9 @@ func TestOAuthService_GenerateAuthURL(t *testing.T) {
 	}
 
 	// 验证 session 已存储
-	session, ok := svc.sessionStore.Get(result.SessionID)
-	if !ok {
-		t.Fatal("session 未在 sessionStore 中找到")
+	var session oauth.OAuthSession
+	if err := svc.sessionStore.Load(context.Background(), OAuthSessionProviderClaude, result.SessionID, &session); err != nil {
+		t.Fatalf("session 未在 sessionStore 中找到: %v", err)
 	}
 	if session.Scope != oauth.ScopeOAuth {
 		t.Fatalf("scope 不匹配: got=%q want=%q", session.Scope, oauth.ScopeOAuth)
@@ -190,9 +190,9 @@ func TestOAuthService_GenerateAuthURL_WithProxy(t *testing.T) {
 		t.Fatalf("GenerateAuthURL 返回错误: %v", err)
 	}
 
-	session, ok := svc.sessionStore.Get(result.SessionID)
-	if !ok {
-		t.Fatal("session 未在 sessionStore 中找到")
+	var session oauth.OAuthSession
+	if err := svc.sessionStore.Load(context.Background(), OAuthSessionProviderClaude, result.SessionID, &session); err != nil {
+		t.Fatalf("session 未在 sessionStore 中找到: %v", err)
 	}
 	if session.ProxyURL != "http://proxy.example.com:8080" {
 		t.Fatalf("ProxyURL 不匹配: got=%q", session.ProxyURL)
@@ -214,9 +214,9 @@ func TestOAuthService_GenerateSetupTokenURL(t *testing.T) {
 	}
 
 	// 验证 scope 是 inference
-	session, ok := svc.sessionStore.Get(result.SessionID)
-	if !ok {
-		t.Fatal("session 未在 sessionStore 中找到")
+	var session oauth.OAuthSession
+	if err := svc.sessionStore.Load(context.Background(), OAuthSessionProviderClaude, result.SessionID, &session); err != nil {
+		t.Fatalf("session 未在 sessionStore 中找到: %v", err)
 	}
 	if session.Scope != oauth.ScopeInference {
 		t.Fatalf("scope 不匹配: got=%q want=%q", session.Scope, oauth.ScopeInference)
@@ -313,9 +313,9 @@ func TestOAuthService_ExchangeCode_Success(t *testing.T) {
 	}
 
 	// 验证 session 已被删除
-	_, ok := svc.sessionStore.Get(result.SessionID)
-	if ok {
-		t.Fatal("session 应在交换成功后被删除")
+	var consumedSession oauth.OAuthSession
+	if err := svc.sessionStore.Load(context.Background(), OAuthSessionProviderClaude, result.SessionID, &consumedSession); err != ErrOAuthSessionNotFound {
+		t.Fatalf("session 应在交换后被删除: %v", err)
 	}
 }
 
