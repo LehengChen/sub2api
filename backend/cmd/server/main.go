@@ -20,6 +20,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
@@ -143,9 +144,15 @@ func runMainServer() {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
 
+	deploymentControl, err := service.LoadDeploymentControlFromEnv()
+	if err != nil {
+		log.Fatalf("Invalid deployment control: %v", err)
+	}
+
 	buildInfo := handler.BuildInfo{
-		Version:   Version,
-		BuildType: BuildType,
+		Version:           Version,
+		BuildType:         BuildType,
+		DeploymentControl: deploymentControl,
 	}
 
 	app, err := initializeApplication(buildInfo)
@@ -162,6 +169,7 @@ func runMainServer() {
 			log.Printf("Prompt Audit started in degraded state: %v", err)
 		}
 	}
+	app.Health.MarkInitialized()
 
 	// 启动服务器
 	go func() {
@@ -177,14 +185,30 @@ func runMainServer() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
+	drainAndShutdown(app)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	log.Println("Server exited")
+}
+
+func drainAndShutdown(app *Application) {
+	// Become unready before closing listeners so the load balancer stops
+	// assigning new work while existing requests are allowed to drain.
+	app.Health.BeginDrain()
+	log.Println("Server is draining...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.Health.ShutdownTimeout())
 	defer cancel()
 
 	if err := app.Server.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
+		log.Printf("Graceful shutdown deadline reached: %v", err)
+		if closeErr := app.Server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			log.Printf("Forced server close failed: %v", closeErr)
+		}
 	}
-
-	log.Println("Server exited")
+	if err := app.Health.WaitForDrain(ctx); err != nil {
+		log.Printf("Long-lived connection drain deadline reached: %v (requests=%d connections=%d)", err, app.Health.ActiveRequests(), app.Health.ActiveConnections())
+		if closeErr := app.Server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			log.Printf("Forced server close after drain failed: %v", closeErr)
+		}
+	}
 }

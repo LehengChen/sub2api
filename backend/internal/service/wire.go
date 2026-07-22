@@ -9,6 +9,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
@@ -17,8 +18,9 @@ import (
 
 // BuildInfo contains build information
 type BuildInfo struct {
-	Version   string
-	BuildType string
+	Version           string
+	BuildType         string
+	DeploymentControl DeploymentControl
 }
 
 // ProvidePricingService creates and initializes PricingService
@@ -33,7 +35,7 @@ func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient)
 
 // ProvideUpdateService creates UpdateService with BuildInfo
 func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, buildInfo BuildInfo) *UpdateService {
-	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType)
+	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType, buildInfo.DeploymentControl)
 }
 
 // ProvideEmailQueueService creates EmailQueueService with default worker count
@@ -56,15 +58,61 @@ func ProvideBatchImageCleanupService(repo BatchImageRepository, accountRepo Acco
 	return svc
 }
 
-// ProvideOpenAIOAuthService creates OpenAIOAuthService with privacy/account enrichment support.
+// ProvideOAuthSessionStore keeps authorization state reachable from every API
+// instance. Redis errors fail OAuth closed; production must never silently fall
+// back to a process-local store in a multi-instance deployment.
+func ProvideOAuthSessionStore(redisClient *redis.Client) (OAuthSessionStore, error) {
+	return NewRedisOAuthSessionStore(redisClient, DefaultOAuthSessionKeyPrefix)
+}
+
+func ProvideOAuthService(
+	proxyRepo ProxyRepository,
+	oauthClient ClaudeOAuthClient,
+	sessionStore OAuthSessionStore,
+) (*OAuthService, error) {
+	return NewOAuthServiceWithSessionStore(proxyRepo, oauthClient, sessionStore)
+}
+
+// ProvideOpenAIOAuthService creates OpenAIOAuthService with shared session
+// state and privacy/account enrichment support.
 func ProvideOpenAIOAuthService(
 	proxyRepo ProxyRepository,
 	oauthClient OpenAIOAuthClient,
 	privacyClientFactory PrivacyClientFactory,
-) *OpenAIOAuthService {
-	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
+	sessionStore OAuthSessionStore,
+) (*OpenAIOAuthService, error) {
+	svc, err := NewOpenAIOAuthServiceWithSessionStore(proxyRepo, oauthClient, sessionStore)
+	if err != nil {
+		return nil, err
+	}
 	svc.SetPrivacyClientFactory(privacyClientFactory)
-	return svc
+	return svc, nil
+}
+
+func ProvideGrokOAuthService(
+	proxyRepo ProxyRepository,
+	oauthClient GrokOAuthClient,
+	sessionStore OAuthSessionStore,
+) (*GrokOAuthService, error) {
+	return NewGrokOAuthServiceWithSessionStore(proxyRepo, oauthClient, sessionStore)
+}
+
+func ProvideGeminiOAuthService(
+	proxyRepo ProxyRepository,
+	oauthClient GeminiOAuthClient,
+	codeAssist GeminiCliCodeAssistClient,
+	driveClient geminicli.DriveClient,
+	cfg *config.Config,
+	sessionStore OAuthSessionStore,
+) (*GeminiOAuthService, error) {
+	return NewGeminiOAuthServiceWithSessionStore(proxyRepo, oauthClient, codeAssist, driveClient, cfg, sessionStore)
+}
+
+func ProvideAntigravityOAuthService(
+	proxyRepo ProxyRepository,
+	sessionStore OAuthSessionStore,
+) (*AntigravityOAuthService, error) {
+	return NewAntigravityOAuthServiceWithSessionStore(proxyRepo, sessionStore)
 }
 
 // ProvideTokenRefreshService creates and starts TokenRefreshService
@@ -702,15 +750,16 @@ var ProviderSet = wire.NewSet(
 	ProvideBatchImageCleanupService,
 	ProvideBatchImageWorkerRuntime,
 	wire.Bind(new(AccountRuntimeBlocker), new(*OpenAIGatewayService)),
-	NewOAuthService,
+	ProvideOAuthSessionStore,
+	ProvideOAuthService,
 	ProvideOpenAIOAuthService,
-	NewGrokOAuthService,
+	ProvideGrokOAuthService,
 	wire.Bind(new(GrokOAuthTokenService), new(*GrokOAuthService)),
-	NewGeminiOAuthService,
+	ProvideGeminiOAuthService,
 	NewGeminiQuotaService,
 	NewCompositeTokenCacheInvalidator,
 	wire.Bind(new(TokenCacheInvalidator), new(*CompositeTokenCacheInvalidator)),
-	NewAntigravityOAuthService,
+	ProvideAntigravityOAuthService,
 	ProvideOAuthRefreshAPI,
 	ProvideGeminiTokenProvider,
 	NewGeminiMessagesCompatService,
