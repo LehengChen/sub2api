@@ -65,27 +65,46 @@ type UpdateService struct {
 	githubClient   GitHubReleaseClient
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds
+	deployment     DeploymentControl
 }
 
 // NewUpdateService creates a new UpdateService
-func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
+
+// The optional deployment argument preserves the constructor used by older
+// integrations while allowing the production binary to inject an immutable
+// external-release policy.
+func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string, controls ...DeploymentControl) *UpdateService {
+	deployment := DefaultDeploymentControl()
+	if len(controls) > 0 {
+		deployment = controls[0]
+		if strings.TrimSpace(deployment.Mode) == "" {
+			deployment.Mode = DeploymentModeSelfManaged
+		}
+	}
 	return &UpdateService{
 		cache:          cache,
 		githubClient:   githubClient,
 		currentVersion: version,
 		buildType:      buildType,
+		deployment:     deployment,
 	}
 }
 
 // UpdateInfo contains update information
 type UpdateInfo struct {
-	CurrentVersion string       `json:"current_version"`
-	LatestVersion  string       `json:"latest_version"`
-	HasUpdate      bool         `json:"has_update"`
-	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
-	Cached         bool         `json:"cached"`
-	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
+	CurrentVersion    string             `json:"current_version"`
+	LatestVersion     string             `json:"latest_version"`
+	HasUpdate         bool               `json:"has_update"`
+	ReleaseInfo       *ReleaseInfo       `json:"release_info,omitempty"`
+	Cached            bool               `json:"cached"`
+	Warning           string             `json:"warning,omitempty"`
+	BuildType         string             `json:"build_type"` // "source" or "release"
+	DeploymentMode    string             `json:"deployment_mode"`
+	ManagedExternally bool               `json:"managed_externally"`
+	Capabilities      UpdateCapabilities `json:"capabilities"`
+	Catalog           *ReleaseCatalog    `json:"catalog,omitempty"`
+	CatalogStatus     string             `json:"catalog_status,omitempty"` // valid, incomplete
+	CheckStatus       string             `json:"check_status,omitempty"`   // fresh, cached, error, managed, unconfigured
 }
 
 // ReleaseInfo contains GitHub release details
@@ -131,9 +150,20 @@ type GitHubAsset struct {
 
 // CheckUpdate checks for available updates
 func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInfo, error) {
+	// Production AWS deployments are externally managed. They may inspect the
+	// approved catalog identity, but must never query upstream or mutate a
+	// running binary from inside the application.
+	if s.IsExternallyManaged() {
+		return s.checkManagedCatalog(), nil
+	}
+
 	// Try cache first
 	if !force {
 		if cached, err := s.getFromCache(ctx); err == nil && cached != nil {
+			cached.CheckStatus = "cached"
+			if cached.Warning == "" {
+				cached.Warning = "Version check is using cached release data; refresh to verify the catalog."
+			}
 			return cached, nil
 		}
 	}
@@ -144,6 +174,7 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 		// Return cached on error
 		if cached, cacheErr := s.getFromCache(ctx); cacheErr == nil && cached != nil {
 			cached.Warning = "Using cached data: " + err.Error()
+			cached.CheckStatus = "cached"
 			return cached, nil
 		}
 		return &UpdateInfo{
@@ -152,6 +183,9 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			HasUpdate:      false,
 			Warning:        err.Error(),
 			BuildType:      s.buildType,
+			DeploymentMode: s.deployment.Mode,
+			Capabilities:   s.deployment.Capabilities(),
+			CheckStatus:    "error",
 		}, nil
 	}
 
@@ -163,6 +197,10 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.IsExternallyManaged() {
+		return ErrExternallyManaged
+	}
+
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -281,6 +319,10 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 // Rollback restores the previous version
 func (s *UpdateService) Rollback() error {
+	if s.IsExternallyManaged() {
+		return ErrExternallyManaged
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
@@ -307,6 +349,10 @@ func (s *UpdateService) Rollback() error {
 // strictly older than the current version (the current version itself is excluded),
 // newest first. Draft and prerelease entries are skipped.
 func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVersion, error) {
+	if s.IsExternallyManaged() {
+		return nil, ErrExternallyManaged
+	}
+
 	releases, err := s.fetchRollbackCandidates(ctx)
 	if err != nil {
 		return nil, err
@@ -327,6 +373,10 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if s.IsExternallyManaged() {
+		return ErrExternallyManaged
+	}
+
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed
@@ -427,9 +477,51 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 			HTMLURL:     release.HTMLURL,
 			Assets:      assets,
 		},
-		Cached:    false,
-		BuildType: s.buildType,
+		Cached:         false,
+		BuildType:      s.buildType,
+		DeploymentMode: s.deployment.Mode,
+		Capabilities:   s.deployment.Capabilities(),
+		CheckStatus:    "fresh",
 	}, nil
+}
+
+// IsExternallyManaged is intentionally exposed as a small policy hook for
+// handlers. The mutation methods below also enforce it so direct service use
+// cannot bypass the policy.
+func (s *UpdateService) IsExternallyManaged() bool {
+	return s.deployment.IsExternallyManaged()
+}
+
+// DeploymentControl returns a copy of the non-secret policy and catalog
+// identity. Callers must treat it as read-only.
+func (s *UpdateService) DeploymentControl() DeploymentControl {
+	return s.deployment
+}
+
+func (s *UpdateService) checkManagedCatalog() *UpdateInfo {
+	catalog := s.deployment.Catalog
+	info := &UpdateInfo{
+		CurrentVersion:    s.currentVersion,
+		LatestVersion:     strings.TrimPrefix(strings.TrimSpace(catalog.Version), "v"),
+		BuildType:         s.buildType,
+		DeploymentMode:    s.deployment.Mode,
+		ManagedExternally: true,
+		Capabilities:      s.deployment.Capabilities(),
+		Catalog:           &catalog,
+		CheckStatus:       "managed",
+	}
+
+	if !catalog.Complete() {
+		info.LatestVersion = s.currentVersion
+		info.CatalogStatus = "incomplete"
+		info.CheckStatus = "unconfigured"
+		info.Warning = "Approved release catalog is incomplete; version status cannot be verified."
+		return info
+	}
+
+	info.CatalogStatus = "valid"
+	info.HasUpdate = compareVersions(s.currentVersion, info.LatestVersion) < 0
+	return info
 }
 
 func (s *UpdateService) downloadFile(ctx context.Context, downloadURL, dest string) error {
@@ -619,6 +711,9 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		ReleaseInfo:    cached.ReleaseInfo,
 		Cached:         true,
 		BuildType:      s.buildType,
+		DeploymentMode: s.deployment.Mode,
+		Capabilities:   s.deployment.Capabilities(),
+		CheckStatus:    "cached",
 	}, nil
 }
 
@@ -655,6 +750,12 @@ func compareVersions(current, latest string) int {
 
 func parseVersion(v string) [3]int {
 	v = strings.TrimPrefix(v, "v")
+	// Frenzy release tags may append patch/build identity. Update availability
+	// compares the upstream semantic core while the catalog exposes the full tag,
+	// source SHA, and image digest for exact artifact identity.
+	if separator := strings.IndexAny(v, "-+"); separator >= 0 {
+		v = v[:separator]
+	}
 	parts := strings.Split(v, ".")
 	result := [3]int{0, 0, 0}
 	for i := 0; i < len(parts) && i < 3; i++ {
