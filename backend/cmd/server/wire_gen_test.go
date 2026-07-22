@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,9 @@ func TestDrainAndShutdownIsBoundedAndMarksUnready(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- httpServer.Serve(listener) }()
 
-	health := server.NewHealthService(nil, nil, &config.Config{Server: config.ServerConfig{ShutdownTimeoutSeconds: 1}})
+	control := runtimecontrol.Default()
+	control.InstanceID = "test-center"
+	health := server.NewHealthService(nil, nil, &config.Config{Server: config.ServerConfig{ShutdownTimeoutSeconds: 1}}, control, nil, nil)
 	health.MarkInitialized()
 	app := &Application{Server: httpServer, Health: health, Cleanup: func() {}}
 

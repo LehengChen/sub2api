@@ -11,7 +11,9 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
+	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -32,6 +34,9 @@ type HealthService struct {
 	postgresProbe     healthProbe
 	redisProbe        healthProbe
 	migrationsProbe   healthProbe
+	runtimeControl    runtimecontrol.Control
+	workerFence       *service.WorkerFence
+	schedulerProbe    healthProbe
 	initialized       atomic.Bool
 	draining          atomic.Bool
 	activityMu        sync.Mutex
@@ -47,7 +52,7 @@ type ReadinessReport struct {
 	Checks map[string]string `json:"checks"`
 }
 
-func NewHealthService(db *sql.DB, redisClient *redis.Client, cfg *config.Config) *HealthService {
+func NewHealthService(db *sql.DB, redisClient *redis.Client, cfg *config.Config, control runtimecontrol.Control, workerFence *service.WorkerFence, scheduler *service.SchedulerSnapshotService) *HealthService {
 	readinessTimeout := defaultReadinessTimeout
 	shutdownTimeout := defaultShutdownTimeout
 	if cfg != nil {
@@ -59,7 +64,7 @@ func NewHealthService(db *sql.DB, redisClient *redis.Client, cfg *config.Config)
 		}
 	}
 
-	return newHealthService(
+	health := newHealthService(
 		readinessTimeout,
 		shutdownTimeout,
 		func(ctx context.Context) error {
@@ -78,6 +83,12 @@ func NewHealthService(db *sql.DB, redisClient *redis.Client, cfg *config.Config)
 			return repository.CheckMigrations(ctx, db)
 		},
 	)
+	health.runtimeControl = control
+	health.workerFence = workerFence
+	if scheduler != nil {
+		health.schedulerProbe = func(context.Context) error { return scheduler.InitialRebuildReady() }
+	}
+	return health
 }
 
 func newHealthService(
@@ -290,6 +301,9 @@ func (s *HealthService) Readiness(ctx context.Context) (ReadinessReport, bool) {
 	checks := map[string]string{
 		"initialization": "ok",
 		"drain":          "ok",
+		"role":           "ok",
+		"worker_fence":   "ok",
+		"scheduler":      "not_required",
 		"postgres":       "not_checked",
 		"redis":          "not_checked",
 		"migrations":     "not_checked",
@@ -303,10 +317,19 @@ func (s *HealthService) Readiness(ctx context.Context) (ReadinessReport, bool) {
 		return ReadinessReport{Status: "not_ready", Checks: checks}, false
 	}
 
+	ready := true
+	if s.runtimeControl.Role != "" && !s.runtimeControl.TrafficEligible() {
+		checks["role"] = "failed"
+		ready = false
+	}
+	if s.runtimeControl.RequiresWorkerLease() && (s.workerFence == nil || !s.workerFence.Valid()) {
+		checks["worker_fence"] = "failed"
+		ready = false
+	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, s.readinessTimeout)
 	defer cancel()
 
-	ready := true
 	probes := []struct {
 		name  string
 		probe healthProbe
@@ -314,6 +337,13 @@ func (s *HealthService) Readiness(ctx context.Context) (ReadinessReport, bool) {
 		{name: "postgres", probe: s.postgresProbe},
 		{name: "redis", probe: s.redisProbe},
 		{name: "migrations", probe: s.migrationsProbe},
+	}
+	if s.schedulerProbe != nil && (s.runtimeControl.Role == "" || s.runtimeControl.RunsWorkers()) {
+		checks["scheduler"] = "not_checked"
+		probes = append(probes, struct {
+			name  string
+			probe healthProbe
+		}{name: "scheduler", probe: s.schedulerProbe})
 	}
 	for _, item := range probes {
 		if item.probe == nil || item.probe(probeCtx) != nil {

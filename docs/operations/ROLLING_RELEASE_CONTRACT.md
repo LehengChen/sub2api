@@ -30,6 +30,11 @@ context，因此完整应用清理仍没有统一硬时限；systemd/container �
 首次 rebuild readiness。以上仍是未部署候选事实，不代表生产已启用双 Center；完整边界和
 人工切换顺序见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)。
 
+同日的 `v0.1.163` integration candidate 进一步加入显式 `active`、`standby`、`worker`、
+`api`、`migrator` 角色、migration-only 启动、Redis worker lease/fencing token 和 scheduler
+首次 rebuild readiness。以上仍是未部署候选事实，不代表生产已启用双 Center；完整边界和
+人工切换顺序见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)。
+
 截至 2026-07-13，当前部署版本存在以下边界：
 
 - `/health` 固定返回 200，只证明 HTTP 进程可以响应，不检查 PostgreSQL、Redis、migration 或账号调度。
