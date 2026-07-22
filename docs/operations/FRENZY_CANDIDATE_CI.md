@@ -12,6 +12,11 @@ backend、frontend、security、lint 和 OCI platform evidence 已通过，但 T
 `.2` 也不构成成功候选。依赖修复后必须使用新的不可变 `.3` 标签重跑，不得移动或
 复用 `.2`。
 
+`.3` 的 unit/integration/race、security、lint、frontend、OCI platform 和 Trivy 全部
+通过；最终 Ent/Wire clean generation 在 readonly module 模式下缺少 Wire generator 的
+`github.com/google/subcommands` checksum。补齐显式间接依赖后必须使用新的不可变 `.4`
+标签重跑，不能移动或复用 `.3`。
+
 ## 触发边界
 
 `.github/workflows/frenzy-candidate.yml` 只接受三类入口：

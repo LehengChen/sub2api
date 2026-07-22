@@ -32,7 +32,11 @@ job 在平台 evidence 步骤停止，不能视为容器扫描成功。随后 `.
 `CVE-2026-29181`（OpenTelemetry `1.37.0`，fixed `1.41.0`）以及
 `CVE-2026-46602`/`CVE-2026-46604`（x/image `0.39.0`，fixed `0.43.0`）。依赖修复
 已提交为 `3432dee8e`（stable patch-id
-`fc1e3faf1b9269c995384c1ac161192a75a6f9b7`）；`.3` 仍待完整远程验证。生产 ECR
+`fc1e3faf1b9269c995384c1ac161192a75a6f9b7`）。`.3` 的 image、security、lint、frontend、
+backend unit/integration/race 全部成功，但 Ent/Wire clean generation 因 readonly 模式
+缺少 `github.com/google/subcommands` checksum 失败；本地已补齐该显式间接依赖并验证
+两次生成幂等，修复提交为 `b7c256cf0`（stable patch-id
+`a251baa3cc5b992970ab182f4bbd17b91bb365da`）。`.4` 仍待完整远程验证。生产 ECR
 digest、provenance、签名和 catalog 仍是后续批准门禁。
 
 ## 身份闭环
@@ -108,8 +112,8 @@ digest、provenance、签名和 catalog 仍是后续批准门禁。
 | FZ-007 | `new` multi-center runtime | 显式角色、migration-only、worker lease 和冷 standby fail-closed |
 | FZ-008 | `new` redirect revalidation | redirect 每一跳重新执行 scheme/host/private-IP policy |
 
-最终 commit、stable patch-id 和 `.1`/`.2` 失败证据已回填
-[`PATCH_QUEUE.md`](PATCH_QUEUE.md)；`.3` 成功证据仍待远程运行。
+最终 commit、stable patch-id 和 `.1`/`.2`/`.3` 失败证据已回填
+[`PATCH_QUEUE.md`](PATCH_QUEUE.md)；`.4` 成功证据仍待远程运行。
 
 ## Required Evidence
 
