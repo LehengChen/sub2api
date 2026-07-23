@@ -92,6 +92,40 @@ migration rehearsal 和真实 synthetic 仍是后续批准门禁。
 
 处置：应用 candidate 已拆出 `--migrate`/`migrator`；其他显式角色只做 checksum readiness。promotion 前仍必须在脱敏恢复快照上 rehearsal，记录耗时、锁、取消、重试、磁盘增长、checksum 和 N/N-1 行为。migration、app activation 和运行模式变更不得同窗。
 
+## v0.1.151 Runner Transition Gate
+
+已部署 v0.1.151 时代的 legacy runner 若不向容器传入 deployment catalog 和
+`SUB2API_PROCESS_ROLE`，直接换成 v0.1.163 镜像会回落到兼容 standalone 安装的
+`self_managed` + `all`。该角色会在应用初始化中执行 migration 和 bootstrap writes，
+因此不能被 app-only 发布当作安全的兼容路径。
+
+应用保持 fail-closed：`externally_managed` 与隐式 `all` 的组合拒绝启动，不自动猜测
+primary 身份，也不根据 hostname、镜像 tag 或配置文件把 legacy runner 静默提升为
+`active`。首次生产激活前必须先完成一个独立、可回滚的 runner-only 过渡，使旧镜像
+保持不变但新 runner 能向容器显式传入：
+
+```text
+SUB2API_DEPLOYMENT_CONTROL_MODE=externally_managed
+SUB2API_PROCESS_ROLE=active
+SUB2API_INSTANCE_ID=center-primary
+SUB2API_WORKER_LEASE_KEY=sub2api:runtime:primary-worker
+SUB2API_WORKER_LEASE_TTL_SECONDS=60
+SUB2API_WORKER_LEASE_RENEW_SECONDS=15
+SUB2API_MULTI_API_ENABLED=false
+```
+
+该 runner-only 变化必须先用 v0.1.151 原镜像验证 image/config/RepoDigest 不变、legacy
+`/health` 和认证 synthetic 通过，并保留旧 runner 回滚。v0.1.151 不识别这些新增变量，
+所以“变量可透传”不等于它已经具备 external update protection 或 worker fencing；这两项
+只能在 v0.1.163 激活后验收。随后仍须先执行独立 migration-only 变化，再由 app-only
+激活 v0.1.163；此时 `active` 只核对 migration checksum，不执行 migration/bootstrap，
+且必须取得 Redis worker lease 后 `/readyz` 才能成功。
+
+当前应用单测固定了两条边界：legacy `all` 不能进入 external 模式；显式 `active` 可以
+接流量但没有 migration/bootstrap write capability。migration readiness 也显式验证旧
+migration 集合可以忽略 174-185 的额外记录。它们不替代真实 v0.1.151 二进制在脱敏
+v0.1.163 schema 上的持续读写、账号 credential 保留、计费和回滚 rehearsal。
+
 ## Compatibility Matrix
 
 | 领域 | v0.1.163 变化/风险 | 当前处置 | promotion gate |

@@ -127,7 +127,10 @@ func validateStartupPolicy(runtimeControl runtimecontrol.Control, deploymentCont
 		return nil
 	}
 	if runtimeControl.Role == runtimecontrol.RoleAll {
-		return fmt.Errorf("externally managed deployments must set %s to an explicit non-legacy role", runtimecontrol.ProcessRoleEnv)
+		return fmt.Errorf(
+			"externally managed deployments must set %s to an explicit non-legacy role; upgrade legacy runners before activating this image",
+			runtimecontrol.ProcessRoleEnv,
+		)
 	}
 	if setupMode {
 		return errors.New("externally managed deployments cannot run setup mode")
