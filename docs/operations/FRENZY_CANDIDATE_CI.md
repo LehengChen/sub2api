@@ -23,6 +23,14 @@ backend、frontend、security、lint 和 OCI platform evidence 已通过，但 T
 frontend、lint 和 summary 全部成功。这只证明本页定义的非生产 candidate gate；报告
 仍明确标记 registry digest 和签名缺失，不能据此部署或 promotion。
 
+不可变 `.5` 候选（源码 `20f1d47e65737cc8476bed277cffc47b3ea48d30`）的远程 run
+[`29978188921`](https://github.com/LehengChen/sub2api/actions/runs/29978188921) 于
+2026-07-23 12:54:40 至 13:08:14（Asia/Tokyo）完成，gate、backend、security、image、
+frontend、lint 和 summary 全部成功。`.5` 在 `.4` 的构建证据上增加了 v0.1.151
+legacy runner transition gate 的单测和 fail-closed 启动策略；它仍是
+`production: false` 的非生产候选，没有 ECR registry digest、签名、approved catalog
+或生产部署授权。
+
 ## 触发边界
 
 `.github/workflows/frenzy-candidate.yml` 只接受三类入口：

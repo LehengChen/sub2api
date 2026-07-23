@@ -13,7 +13,7 @@ adapter）、Ent/Wire 二次生成洁净检查、`golangci-lint v2.9.0`、
 现有例外门禁、workflow policy、Terraform validate/test（私有 ops 27/27）和新增
 shell/controller 测试。
 
-不可变候选 `frenzy/candidate/0.1.163-frenzy.1` 对应完整源码
+历史失败候选 `frenzy/candidate/0.1.163-frenzy.1` 对应完整源码
 `713c4999354ab33bc01fc863ed9817cde96ea1d3`。远程 run
 [`29929198055`](https://github.com/LehengChen/sub2api/actions/runs/29929198055) 于
 2026-07-22 23:33:55 至 23:47:06（Asia/Tokyo）运行：gate、backend、frontend 和
@@ -48,6 +48,16 @@ Redis integration、必需测试 no-skip、目标 race 和 Ent/Wire clean genera
 manifest digest 为 `sha256:81a8c5b8eb7be7bac64cf7e56eaf8e748a02d202b458bdf3699df502c0d9f6e1`。
 registry digest 和签名仍明确为 missing；生产 ECR digest、provenance/签名、catalog、
 migration rehearsal 和真实 synthetic 仍是后续批准门禁。
+
+最新不可变候选 `frenzy/candidate/0.1.163-frenzy.5` 对应完整源码
+`20f1d47e65737cc8476bed277cffc47b3ea48d30`。远程 run
+[`29978188921`](https://github.com/LehengChen/sub2api/actions/runs/29978188921) 于
+2026-07-23 12:54:40 至 13:08:14（Asia/Tokyo）完成，gate、backend、security、image、
+frontend、lint 和 summary 全部成功。`.5` 在 `.4` 的候选构建证据上增加了
+v0.1.151 legacy runner transition gate 的 fail-closed 启动测试；该 run 仍标记
+`production=false`，没有生产 ECR digest、签名、approved catalog、migration rehearsal、
+生产 synthetic 或部署授权。后续引用 v163 candidate 时以 `.5`/该完整 SHA 为准，历史
+`.4` 只保留作审计记录。
 
 ## 身份闭环
 
@@ -156,7 +166,7 @@ v0.1.163 schema 上的持续读写、账号 credential 保留、计费和回滚 
 | FZ-007 | `new` multi-center runtime | 显式角色、migration-only、worker lease 和冷 standby fail-closed |
 | FZ-008 | `new` redirect revalidation | redirect 每一跳重新执行 scheme/host/private-IP policy |
 
-最终 commit、stable patch-id、`.1`/`.2`/`.3` 失败证据和 `.4` 成功证据已回填
+最终 commit、stable patch-id、`.1`/`.2`/`.3` 失败证据和 `.4`/`.5` 成功证据已回填
 [`PATCH_QUEUE.md`](PATCH_QUEUE.md)。这完成 candidate CI 门禁，不授权 production
 promotion。
 

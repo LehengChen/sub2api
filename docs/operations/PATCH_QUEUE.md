@@ -52,6 +52,12 @@ readonly Wire generation 缺少 `github.com/google/subcommands` checksum，summa
 [`29936467514`](https://github.com/LehengChen/sub2api/actions/runs/29936467514) 已通过全部
 candidate job 和 summary；它仍是非生产 evidence，不提供 approved ECR digest、签名、
 release manifest、migration rehearsal 或生产 synthetic，因此不能单独授权 promotion。
+随后不可变 `.5`（源码
+`20f1d47e65737cc8476bed277cffc47b3ea48d30`）的远程 run
+[`29978188921`](https://github.com/LehengChen/sub2api/actions/runs/29978188921) 也通过全部
+candidate job 和 summary；`.5` 增加了 legacy runner transition gate 的 fail-closed
+测试，但仍不提供 approved ECR digest、签名、release manifest、migration rehearsal 或
+生产 synthetic。`.4` 与 `.5` 都只是非生产 evidence，不能单独授权 promotion。
 本地验证快照见 [`UPGRADE_V0.1.163.md`](UPGRADE_V0.1.163.md)，因此本节不能授权
 promotion。
 
