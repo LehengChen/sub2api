@@ -107,10 +107,17 @@ FROM ${POSTGRES_IMAGE} AS pg-client
 # -----------------------------------------------------------------------------
 FROM ${ALPINE_IMAGE}
 
-# Labels
-LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
-LABEL description="Sub2API - AI API Gateway Platform"
-LABEL org.opencontainers.image.source="https://github.com/Wei-Shaw/sub2api"
+# Release identity is repeated in the final stage so registry metadata can be
+# tied to the same full source revision embedded in the binary.
+ARG VERSION
+ARG COMMIT
+ARG DATE
+LABEL maintainer="LehengChen <github.com/LehengChen>" \
+      description="Sub2API - AI API Gateway Platform" \
+      org.opencontainers.image.source="https://github.com/LehengChen/sub2api" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}"
 
 # Install runtime dependencies
 RUN apk add --no-cache \
