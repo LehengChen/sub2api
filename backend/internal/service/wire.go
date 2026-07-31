@@ -38,9 +38,10 @@ func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, b
 	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType, buildInfo.DeploymentControl)
 }
 
-// ProvideEmailQueueService creates EmailQueueService with default worker count
-func ProvideEmailQueueService(emailService *EmailService) *EmailQueueService {
-	return NewEmailQueueService(emailService, 3)
+// ProvideEmailQueueService creates EmailQueueService with default worker count.
+// Standby instances retain the dependency but do not run email workers.
+func ProvideEmailQueueService(emailService *EmailService, fence *WorkerFence) *EmailQueueService {
+	return newEmailQueueService(emailService, 3, shouldStartBackgroundWorkers(fence))
 }
 
 // ProvideOAuthRefreshAPI creates OAuthRefreshAPI with the default lock TTL.
@@ -717,8 +718,43 @@ func ProvideBillingCacheService(
 	rateRepo UserGroupRateRepository,
 	cfg *config.Config,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	fence *WorkerFence,
 ) *BillingCacheService {
-	return NewBillingCacheService(cache, userRepo, subRepo, apiKeyRepo, rpmCache, rateRepo, cfg, userPlatformQuotaRepo)
+	return newBillingCacheService(cache, userRepo, subRepo, apiKeyRepo, rpmCache, rateRepo, cfg, userPlatformQuotaRepo, shouldStartBackgroundWorkers(fence))
+}
+
+// ProvideSubscriptionService keeps standby subscription reads available while
+// suppressing its maintenance queue and cache invalidation subscriber.
+func ProvideSubscriptionService(
+	groupRepo GroupRepository,
+	userSubRepo UserSubscriptionRepository,
+	billingCacheService *BillingCacheService,
+	entClient *dbent.Client,
+	cfg *config.Config,
+	fence *WorkerFence,
+) *SubscriptionService {
+	return newSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg, shouldStartBackgroundWorkers(fence), !isStandbyFence(fence))
+}
+
+// ProvideUsageRecordWorkerPool returns an inert pool on standby so usage
+// recording cannot execute or synchronously fall back there.
+func ProvideUsageRecordWorkerPool(cfg *config.Config, fence *WorkerFence) *UsageRecordWorkerPool {
+	return NewUsageRecordWorkerPoolForRuntime(cfg, fence)
+}
+
+// ProvideContentModerationService keeps synchronous moderation dependencies
+// available while suppressing asynchronous workers on standby.
+func ProvideContentModerationService(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	fence *WorkerFence,
+) *ContentModerationService {
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, shouldStartBackgroundWorkers(fence))
 }
 
 // ProvideAPIKeyService wires APIKeyService and connects rate-limit cache invalidation.
@@ -813,11 +849,11 @@ var ProviderSet = wire.NewSet(
 	NewNotificationEmailService,
 	ProvideEmailQueueService,
 	NewTurnstileService,
-	NewSubscriptionService,
+	ProvideSubscriptionService,
 	wire.Bind(new(DefaultSubscriptionAssigner), new(*SubscriptionService)),
 	ProvideConcurrencyService,
 	ProvideUserMessageQueueService,
-	NewUsageRecordWorkerPool,
+	ProvideUsageRecordWorkerPool,
 	ProvideSchedulerSnapshotService,
 	NewIdentityService,
 	NewCRSSyncService,
@@ -847,7 +883,7 @@ var ProviderSet = wire.NewSet(
 	NewGroupCapacityService,
 	NewChannelService,
 	NewModelPricingResolver,
-	NewContentModerationService,
+	ProvideContentModerationService,
 	NewAffiliateService,
 	ProvidePaymentConfigService,
 	ProvidePaymentService,

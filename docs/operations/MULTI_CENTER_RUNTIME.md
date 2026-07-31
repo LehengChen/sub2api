@@ -1,6 +1,6 @@
 # Multi-Center Runtime Contract
 
-截至 2026-07-22（Asia/Tokyo），本文件描述应用源码中的多 Center 运行契约。它不表示生产已经有第二台 Center，也不表示 RDS、Redis 或应用已经达到高可用。生产拓扑、slot 身份和切换证据只记录在私有运维仓库。
+截至 2026-08-01（Asia/Tokyo），本文件描述应用源码中的多 Center 运行契约。它不表示生产已经有第二台 Center，也不表示 RDS、Redis 或应用已经达到高可用。生产拓扑、slot 身份和切换证据只记录在私有运维仓库。
 
 ## 进程角色
 
@@ -58,6 +58,11 @@ SUB2API_WORKER_LEASE_RENEW_SECONDS=10
 - active worker 的 scheduler 首次快照 rebuild 已成功。
 
 `standby` 的 `/livez` 可以为 200，但 `/readyz` 必须为 503。这能防止误把冷 standby 注册到 ALB。提升 standby 时应先以 `active` 配置重启、取得新 fencing token、连续通过 readiness 和认证 synthetic，再注册流量。
+
+standby provider 门控已覆盖邮件队列、billing-cache 异步写队列、content moderation、
+subscription maintenance/invalidation、usage-record pool，以及 upstream billing/Ollama
+周期探测；测试只证明这些启动任务不会在 standby 创建。请求路径中的临时 goroutine 和
+尚未接入条件写入的后台副作用仍不构成完整 fencing 证明。
 
 ## 人工切换顺序
 
