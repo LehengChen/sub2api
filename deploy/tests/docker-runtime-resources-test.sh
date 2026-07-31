@@ -28,6 +28,16 @@ test -s backend/resources/model-pricing/model_prices_and_context_window.json || 
 
 assert_line Dockerfile.goreleaser 'COPY --chown=sub2api:sub2api backend/resources /app/resources'
 assert_line deploy/Dockerfile 'COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources'
+assert_line Dockerfile '    CMD wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/livez || exit 1'
+assert_line deploy/Dockerfile '    CMD wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/livez || exit 1'
+for compose_file in \
+  deploy/docker-compose.yml \
+  deploy/docker-compose.local.yml \
+  deploy/docker-compose.dev.yml \
+  deploy/docker-compose.standalone.yml; do
+  grep -F 'http://localhost:8080/readyz' "$compose_file" >/dev/null || \
+    fail "$compose_file must use /readyz for service health"
+done
 assert_count .goreleaser.yaml '      - backend/resources' 4
 assert_count .goreleaser.simple.yaml '      - backend/resources' 1
 
