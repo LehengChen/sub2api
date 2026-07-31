@@ -4,11 +4,15 @@
 
 ## 当前事实
 
-截至 2026-07-31（Asia/Tokyo），应用源码中的 `/livez` 只证明进程 HTTP listener 可响应；
+截至 2026-08-01（Asia/Tokyo），应用源码中的 `/livez` 只证明进程 HTTP listener 可响应；
 `/readyz` 会在同一个有界 probe context 内检查初始化、drain、进程角色、worker fencing
 lease、PostgreSQL、Redis、migration checksum，以及 worker 角色的 scheduler 首次 rebuild。
 probe 响应只输出 `ok`/`failed`，不会回传可能含连接信息的底层错误。该源码事实不自动证明
 已经部署到生产；生产事实仍须从私有 release manifest 和 running artifact 闭环核对。
+
+生产镜像自身的 Docker `HEALTHCHECK` 使用 `/livez`，只负责进程存活；Compose 和示例
+Caddy 的流量健康检查使用 `/readyz`。`/health` 继续作为旧部署兼容别名，但新的负载均衡
+或服务编排配置不得用它替代 readiness。
 
 SIGTERM 会先令 `/readyz` 失败并拒绝新请求，再在配置的 shutdown 总预算内调用
 `http.Server.Shutdown` 和等待活动 handler。普通 HTTP/SSE 由 request registry 与
@@ -25,7 +29,7 @@ quota final flush` 严格串行，再并行停止其余独立后台服务，最�
 context，因此完整应用清理仍没有统一硬时限；systemd/container 的最终停止上限和生产实际
 排空耗时必须通过候选演练测量，不能从 HTTP shutdown timeout 推算。
 
-截至 2026-07-22 的 `v0.1.163` integration candidate 进一步加入显式 `active`、`standby`、`worker`、
+截至 2026-08-01 的 `v0.1.169` integration candidate 已保留并扩展显式 `active`、`standby`、`worker`、
 `api`、`migrator` 角色、migration-only 启动、Redis worker lease/fencing token 和 scheduler
 首次 rebuild readiness。以上仍是未部署候选事实，不代表生产已启用双 Center；完整边界和
 人工切换顺序见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)。
