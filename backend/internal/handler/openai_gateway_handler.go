@@ -1651,6 +1651,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		)
 		return
 	}
+	releaseDrainRegistration := middleware2.RegisterLongLivedConnection(c, wsConn.CloseNow)
+	defer releaseDrainRegistration()
 	defer func() {
 		_ = wsConn.CloseNow()
 	}()
