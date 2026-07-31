@@ -77,14 +77,14 @@ reviewer: Frenzy maintenance agent
 | 模型/价格/计费/余额/订阅 | upstream pricing fallback 和本地 offline pricing 都变更；必须做离线定价、Claude/OpenAI synthetic、usage/billing/idempotency 验收。 |
 | 分组/调度/固定代理 | composite route、group policy、scheduler snapshot 和固定出口绑定需保持；出口扩容是独立 infra 轴，不随应用 release 自动发生。 |
 | 前端静态资源与旧后端 | Version 页面支持外部运维模式、缓存/失败 warning；旧后端 API 兼容需执行前端 build 与浏览器 smoke。 |
-| 后台 cron/worker/leader lock | FZ-007 只提供 lease/fencing 门禁；所有单例任务仍需逐项标注幂等性和 fencing 证据，自动 failover 关闭。 |
+| 后台 cron/worker/leader lock | FZ-007 已将启动门禁扩展到 email、billing-cache、content moderation、subscription maintenance、usage-record pool 和 upstream account probes；仍只有 lease/失租排空证据，关键写入的 token fencing、双进程 integration 和幂等性尚未完成，自动 failover 关闭。 |
 | SSE/WebSocket/HTTP2/TLS | bounded drain 已实现；WebSocket 只有注册到长连接 registry 的 handler 可纳入排空，不能宣称绝对无中断；真实 ALB 测量待做。 |
 | upstream URL/redirect/DNS | FZ-008 每跳重新校验 allowlist、HTTPS、端口、userinfo 和私网 DNS；未列出的 host 必须拒绝，需真实网关/出口测试。 |
 | 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck、完整 Vitest（197 files/1356 tests）和生产构建已通过；`xlsx@0.18.5` 已替换为 `@e965/xlsx@0.20.3`，生产依赖审计结果为 high/critical 0（仍有 low 8、moderate 29）；完整 amd64 镜像与容器扫描仍是 release gate。 |
 
 ### 不能从当前静态实现推导的能力
 
-- `WorkerFence.Token()` 当前只在测试/接口层暴露，没有接入关键生产写入的条件更新或数据库约束；`startSingletonWorker` 只在启动时检查 lease。lease 丢失后会触发进程 drain，但不能据此证明所有已启动 worker 已立即停止写入。因此 FZ-007 目前只是启动门禁和失租通知，不是完整 write fencing；只能保留审计的手动 failover，禁止 active-active 或自动故障切换。
+- `WorkerFence.Token()` 当前只在测试/接口层暴露，没有接入关键生产写入的条件更新或数据库约束；`startSingletonWorker` 只在启动时检查 lease。lease 丢失后会触发进程 drain，但不能据此证明所有已启动 worker 已立即停止写入。因此 FZ-007 目前是启动门禁和失租通知，不是完整 write fencing；只能保留审计的手动 failover，禁止 active-active 或自动故障切换。
 - `ValidateResolvedIP` 在 transport 实际拨号前单独做 DNS 查询；当前 HTTP transport 未证明把已校验 IP 固定到 socket，存在 DNS-to-connect TOCTOU。每跳 redirect 校验不能单独宣称已消除代理侧 DNS rebinding，必须用真实网关/出口路径完成审计。
 
 ## Patch 处置

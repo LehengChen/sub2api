@@ -63,6 +63,39 @@ func TestWorkerFenceLosesReadinessWhenLeaseOwnershipChanges(t *testing.T) {
 	require.False(t, fence.WorkersEnabled())
 }
 
+func TestWorkerFenceLostOwnerCannotReleaseSuccessorLease(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	controlA := activeFenceControl("center-a")
+	first, err := NewWorkerFence(client, controlA)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = first.Stop() })
+
+	// Expire A's lease before its next real-time renewal, then let B acquire the
+	// same key. This models a stalled old primary followed by a fenced takeover.
+	server.FastForward(controlA.WorkerLeaseTTL + time.Millisecond)
+	second, err := NewWorkerFence(client, activeFenceControl("center-b"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = second.Stop() })
+	require.Greater(t, second.Token(), first.Token())
+
+	select {
+	case <-first.Lost():
+	case <-time.After(time.Second):
+		t.Fatal("old worker fence did not detect successor ownership")
+	}
+	require.NoError(t, first.Stop())
+
+	leaseValue, err := client.Get(context.Background(), controlA.WorkerLeaseKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, second.value, leaseValue)
+
+	_, err = NewWorkerFence(client, activeFenceControl("center-c"))
+	require.ErrorIs(t, err, ErrWorkerFenceHeld)
+}
+
 func TestWorkerFenceDisablesWorkersForStandbyWithoutRedis(t *testing.T) {
 	control := runtimecontrol.Default()
 	control.Role = runtimecontrol.RoleStandby

@@ -139,6 +139,19 @@ Release C: contract，确认回滚窗口结束后清理
 - 备份、账号定时测试、渠道监控、token refresh、cleanup、aggregation 等所有启动任务逐项分类为“每实例幂等”或“带 fencing 的单例”；
 - 不依赖负载均衡 sticky session 掩盖状态不共享问题。
 
+当前源码已把下列启动路径接入 `WorkerFence`：token refresh、scheduler/cleanup、备份、
+渠道监控、账号/代理/订阅 expiry、ops/audit、batch image、auth-cache outbox、
+email queue、billing-cache 异步写队列、content-moderation worker、subscription
+maintenance/invalidation subscriber、usage-record pool，以及 upstream billing/Ollama
+周期探测。`standby` 会构造只读依赖但不启动这些单例任务；standby 的 usage-record 提交、
+异步 billing-cache 写入和邮件入队会被丢弃或显式返回 disabled。相关 provider 契约测试位于
+`backend/internal/service/standby_worker_providers_test.go` 和
+`provider_worker_fence_test.go`。
+
+这只证明“启动门控”和“失租后排空”路径，不证明所有关键写入都携带 fencing token。
+`WorkerFence` 丢失后进程会进入 drain，但仍需逐项完成双进程 integration、共享状态和
+幂等性验证；在这些证据完成前，自动 failover 与 active-active 继续关闭。
+
 ## 发布兼容清单
 
 每个应用 release 必须给出：
