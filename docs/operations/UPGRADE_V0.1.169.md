@@ -34,14 +34,31 @@ reviewer: Frenzy maintenance agent
 
 | 检查 | 结论与证据 |
 |---|---|
-| 新增 migration 清单 | `backend/migrations` 中新增 28 个 SQL/迁移测试文件；完整差异留在源码历史，运行时按文件名排序。 |
+| 新增 migration 清单 | 相对已部署 v0.1.151 新增 25 个 SQL migration 和 3 个 migration 测试文件；相对 v0.1.163 新增 8 个 SQL migration。完整差异留在源码历史，运行时按完整文件名排序。 |
 | expand / backfill / contract | 大多数为新增表/nullable 或带默认列和索引（expand）；`175_default_openai_long_context_billing.sql` 含函数、触发器和 accounts backfill，属于行为改变 + 数据回填，必须单独 rehearsal；没有可直接宣称完成的 contract。 |
 | 锁表与数据规模 | 未在生产执行；CREATE INDEX CONCURRENTLY 文件不持有普通表级写锁，但耗时、失败残留和长事务风险仍需脱敏生产形状 rehearsal。 |
 | migration 可重试性/checksum | runner 已有 filename/checksum、`CheckMigrations`、非事务模式和 invalid-index 重试测试；生产 checksum 尚未读取/ attestation。 |
 | N 与 N+1 同时运行 | 仅源码静态审查；新增字段大多旧代码可忽略，但 175 触发器、188/189 request/group live 语义和 184 outbox 需双版本 integration 才能通过。 |
 | N+1 写入后 N 可读取 | 未证明。尤其 accounts.extra 触发器、group live 字段、session/cache payload 需 N/N-1 测试。 |
 | 仅镜像回滚是否安全 | 否，当前结论为 `database-restore-required-or-maintenance-window`，直到完成 expand/backfill 与旧版本读写测试。 |
-| 需要的快照/PITR 与恢复点 | 生产 PITR 恢复点已建立，但 v0.1.169 migration 前仍需新的 approved snapshot/PITR marker 和脱敏 rehearsal；本次不执行应用 migration。 |
+| 需要的快照/PITR 与恢复点 | 当前只核实到历史生产恢复能力/恢复点；针对本次 v0.1.169 migration 的 approved pre-migration snapshot/PITR marker 尚未建立，仍需先完成并做脱敏 rehearsal；本次不执行应用 migration。 |
+
+### v0.1.163 → v0.1.169 新增 SQL migration
+
+以下清单来自源码差异，不代表已经在生产执行。runner 按完整 filename 排序，因此
+数字前缀相同的文件也有确定顺序（例如 `172_composite...` 排在已有的
+`172_video...` 之前）。
+
+| 文件 | 静态影响判断 | 发布门禁 |
+|---|---|---|
+| `172_composite_model_routes.sql` | 新表、外键和 3 个部分索引；expand。 | 验证现有分组/路由读写、删除级联和旧版本忽略未知表。 |
+| `186_alipay_mobile_precreate_deep_link.sql` | 仅插入默认关闭的 setting；行为由显式 opt-in 控制。 | 确认旧版本读取 setting 不失败，默认仍走 legacy WAP。 |
+| `186_group_auth_cache_image_generation.sql` | 替换群组 auth-cache 失效触发器函数，新增 image-generation 变化的 outbox 失效事件。 | 双实例验证 UPDATE/DELETE、outbox 幂等、Redis 消费延迟和重复事件。 |
+| `187_add_usage_log_session_id.sql` | `usage_logs`/`batch_image_jobs` 增加 nullable `session_id`；预期 metadata-only，但仍需核对表规模和锁等待。 | 生产形状 rehearsal、旧版本读取兼容、敏感值截断/留空检查。 |
+| `188_allow_live_usage_request_type.sql` | 重建 request-type check constraint，将允许范围扩展到 `0..5`。 | N/N-1 读写测试，确认旧版本不会拒绝新类型或错误计费。 |
+| `189_add_group_allow_live.sql` | `groups.allow_live` 为 `NOT NULL DEFAULT false`。 | 旧管理员写路径和 API DTO 未知字段兼容；确认默认关闭。 |
+| `190_add_users_email_alias_dedup_index_notx.sql` | 非事务 `CREATE INDEX CONCURRENTLY` 表达式索引；可能长时间运行并留下 invalid index。 | 独立 migration-only rehearsal、长事务/取消/重试和 invalid-index 清理演练。 |
+| `191_passkey_credentials.sql` | 新增 passkey handle/credential 表及索引；不应自动开启功能。 | RP origin、认证回调、Redis session 和双 Center 共享状态验收后才可 opt-in。 |
 
 ### 数据风险重点
 
@@ -63,7 +80,12 @@ reviewer: Frenzy maintenance agent
 | 后台 cron/worker/leader lock | FZ-007 只提供 lease/fencing 门禁；所有单例任务仍需逐项标注幂等性和 fencing 证据，自动 failover 关闭。 |
 | SSE/WebSocket/HTTP2/TLS | bounded drain 已实现；WebSocket 只有注册到长连接 registry 的 handler 可纳入排空，不能宣称绝对无中断；真实 ALB 测量待做。 |
 | upstream URL/redirect/DNS | FZ-008 每跳重新校验 allowlist、HTTPS、端口、userinfo 和私网 DNS；未列出的 host 必须拒绝，需真实网关/出口测试。 |
-| 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck/targeted tests 已通过；完整 amd64 镜像、govulncheck、容器扫描仍是 release gate。 |
+| 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck、完整 Vitest（197 files/1356 tests）和生产构建已通过；`xlsx@0.18.5` 已替换为 `@e965/xlsx@0.20.3`，生产依赖审计结果为 high/critical 0（仍有 low 8、moderate 29）；完整 amd64 镜像与容器扫描仍是 release gate。 |
+
+### 不能从当前静态实现推导的能力
+
+- `WorkerFence.Token()` 当前只在测试/接口层暴露，没有接入关键生产写入的条件更新或数据库约束；`startSingletonWorker` 只在启动时检查 lease。lease 丢失后会触发进程 drain，但不能据此证明所有已启动 worker 已立即停止写入。因此 FZ-007 目前只是启动门禁和失租通知，不是完整 write fencing；只能保留审计的手动 failover，禁止 active-active 或自动故障切换。
+- `ValidateResolvedIP` 在 transport 实际拨号前单独做 DNS 查询；当前 HTTP transport 未证明把已校验 IP 固定到 socket，存在 DNS-to-connect TOCTOU。每跳 redirect 校验不能单独宣称已消除代理侧 DNS rebinding，必须用真实网关/出口路径完成审计。
 
 ## Patch 处置
 
@@ -72,15 +94,15 @@ reviewer: Frenzy maintenance agent
 ## 已完成验证与缺口
 
 ```yaml
-backend_unit: passed targeted service, server, repository, cmd/server; full ./... pending
+backend_unit: passed `GOMAXPROCS=2 go test -tags=unit ./...`
 backend_integration: not-run against a real PostgreSQL/Redis candidate
 wire_ent_generation: passed with Go 1.26.5; generated diff committed
 frontend_lint_typecheck: passed
-frontend_targeted_tests: passed (34 tests)
-frontend_full_test_build: pending build/full suite
+frontend_targeted_tests: passed (34 tests plus capability mock regressions)
+frontend_full_test_build: passed (197 files / 1356 tests; production build)
 golangci_lint: not-run
-govulncheck: not-run
-dependency_audit: not-run
+govulncheck: passed (0 vulnerabilities in reachable code/imports; 3 required-but-not-called modules remain)
+dependency_audit: high/critical 0; low 8, moderate 29; pnpm audit exits non-zero for remaining advisories
 container_scan: blocked locally by Docker socket permission; no production claim
 linux_amd64_image: not-built locally; CI/ECR evidence required
 migration_rehearsal: not-run; required before approval
