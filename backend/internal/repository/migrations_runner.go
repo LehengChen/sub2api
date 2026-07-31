@@ -59,6 +59,8 @@ const latestAPIKeyIPIndexMigration = "174_add_usage_logs_api_key_latest_ip_index
 const latestAPIKeyIPIndex = "idx_usage_logs_api_key_latest_ip"
 const opsSystemLogsHostIndexMigration = "175a_add_ops_system_logs_host_index_notx.sql"
 const opsSystemLogsHostIndex = "idx_ops_system_logs_host_created_at"
+const usersEmailAliasIndexMigration = "190_add_users_email_alias_dedup_index_notx.sql"
+const usersEmailAliasIndex = "idx_users_email_dot_stripped"
 
 type migrationChecksumCompatibilityRule struct {
 	fileChecksum       string
@@ -359,6 +361,8 @@ func prepareNonTransactionalMigration(ctx context.Context, db migrationConnectio
 		return dropInvalidIndexIfPresent(ctx, db, latestAPIKeyIPIndex)
 	case opsSystemLogsHostIndexMigration:
 		return dropInvalidIndexIfPresent(ctx, db, opsSystemLogsHostIndex)
+	case usersEmailAliasIndexMigration:
+		return dropInvalidIndexIfPresent(ctx, db, usersEmailAliasIndex)
 	default:
 		return nil
 	}
