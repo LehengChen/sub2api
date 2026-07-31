@@ -57,14 +57,14 @@ reviewer: Frenzy maintenance agent
 | `187_add_usage_log_session_id.sql` | `usage_logs`/`batch_image_jobs` 增加 nullable `session_id`；预期 metadata-only，但仍需核对表规模和锁等待。 | 生产形状 rehearsal、旧版本读取兼容、敏感值截断/留空检查。 |
 | `188_allow_live_usage_request_type.sql` | 重建 request-type check constraint，将允许范围扩展到 `0..5`。 | N/N-1 读写测试，确认旧版本不会拒绝新类型或错误计费。 |
 | `189_add_group_allow_live.sql` | `groups.allow_live` 为 `NOT NULL DEFAULT false`。 | 旧管理员写路径和 API DTO 未知字段兼容；确认默认关闭。 |
-| `190_add_users_email_alias_dedup_index_notx.sql` | 非事务 `CREATE INDEX CONCURRENTLY` 表达式索引；可能长时间运行并留下 invalid index。 | 独立 migration-only rehearsal、长事务/取消/重试和 invalid-index 清理演练。 |
+| `190_add_users_email_alias_dedup_index_notx.sql` | 非事务 `CREATE INDEX CONCURRENTLY` 表达式索引；可能长时间运行并留下 invalid index。候选 runner 已像 174/175a 一样在重试前精确删除同名 invalid index。 | 独立 migration-only rehearsal、长事务/取消/重试和 invalid-index 清理演练；mock 回归测试不替代真实 PostgreSQL 锁与耗时证据。 |
 | `191_passkey_credentials.sql` | 新增 passkey handle/credential 表及索引；不应自动开启功能。 | RP origin、认证回调、Redis session 和双 Center 共享状态验收后才可 opt-in。 |
 
 ### 数据风险重点
 
 - `175_default_openai_long_context_billing.sql` 会更新 accounts.extra、创建触发器并写入 scheduler_outbox；不能和应用镜像替换绑定成一次不可回滚操作。
 - `180`/`181`/`182` 会增加审计和 prompt-audit 数据面；retention、访问角色、PITR 暴露和容量预算未获批准，功能不得默认启用。
-- `190..._notx.sql` 必须在独立 migration-only 窗口执行，并验证长事务、重复索引和恢复重试。
+- `190..._notx.sql` 必须在独立 migration-only 窗口执行，并验证长事务、重复索引和恢复重试；`f8c285dbd594101c9941a6270507c8dc328a2593` 只补齐 fail-safe runner，不授权生产迁移。
 
 ## 配置与接口逐项审查
 
@@ -78,7 +78,7 @@ reviewer: Frenzy maintenance agent
 | 分组/调度/固定代理 | composite route、group policy、scheduler snapshot 和固定出口绑定需保持；出口扩容是独立 infra 轴，不随应用 release 自动发生。 |
 | 前端静态资源与旧后端 | Version 页面支持外部运维模式、缓存/失败 warning；旧后端 API 兼容需执行前端 build 与浏览器 smoke。 |
 | 后台 cron/worker/leader lock | FZ-007 已将启动门禁扩展到 email、billing-cache、content moderation、subscription maintenance、usage-record pool 和 upstream account probes；仍只有 lease/失租排空证据，关键写入的 token fencing、双进程 integration 和幂等性尚未完成，自动 failover 关闭。 |
-| SSE/WebSocket/HTTP2/TLS | bounded drain 已实现；WebSocket 只有注册到长连接 registry 的 handler 可纳入排空，不能宣称绝对无中断；真实 ALB 测量待做。 |
+| SSE/WebSocket/HTTP2/TLS | bounded drain 已实现；当前 OpenAI Responses、Live sideband 和管理面 QPS WebSocket 均注册到长连接 registry，超时会强制断开并等待尾部 usage 收尾。客户端仍需重连，不能宣称绝对无中断；真实 ALB 测量待做。 |
 | upstream URL/redirect/DNS | FZ-008 每跳重新校验 allowlist、HTTPS、端口、userinfo 和私网 DNS；未列出的 host 必须拒绝，需真实网关/出口测试。 |
 | 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck、完整 Vitest（197 files/1356 tests）和生产构建已通过；`xlsx@0.18.5` 已替换为 `@e965/xlsx@0.20.3`，生产依赖审计结果为 high/critical 0（仍有 low 8、moderate 29）；完整 amd64 镜像与容器扫描仍是 release gate。 |
 
