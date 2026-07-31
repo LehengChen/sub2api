@@ -100,11 +100,13 @@ wire_ent_generation: passed with Go 1.26.5; generated diff committed
 frontend_lint_typecheck: passed
 frontend_targeted_tests: passed (34 tests plus capability mock regressions)
 frontend_full_test_build: passed (197 files / 1356 tests; production build)
-golangci_lint: not-run
+golangci_lint: passed with v2.9.0; 0 issues
 govulncheck: passed (0 vulnerabilities in reachable code/imports; 3 required-but-not-called modules remain)
 dependency_audit: high/critical 0; low 8, moderate 29; pnpm audit exits non-zero for remaining advisories
-container_scan: blocked locally by Docker socket permission; no production claim
-linux_amd64_image: not-built locally; CI/ECR evidence required
+container_scan: GitHub Security Scan passed; private registry Inspector result remains a production gate
+linux_amd64_image: passed for immutable build-only candidate frenzy/candidate/0.1.169-frenzy.1
+ci: passed for candidate source f632528563cf57ec7fdbefb7221d1a770ab88cc9
+sbom_provenance: BuildKit SBOM and mode=max provenance generated; private registry identity is recorded only in ops
 migration_rehearsal: not-run; required before approval
 proxy_group_billing_e2e: not-run against real gateway/egress
 claude_synthetic: not-run
