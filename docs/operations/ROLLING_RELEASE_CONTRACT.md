@@ -4,12 +4,31 @@
 
 ## 当前事实
 
-截至 2026-07-22（Asia/Tokyo），应用源码已加入 `/livez`、真实 `/readyz`、可配置
-readiness/shutdown timeout，以及 SIGTERM 先标记 not-ready 再进行有限排空的生命周期
-实现。该源码变更尚未自动证明已经部署到生产；生产事实仍须从私有 release manifest
-和运行工件核对。普通 HTTP/SSE 会由应用排空计数和 `http.Server.Shutdown` 管理；
-hijacked WebSocket 只有在 handler 使用长连接 registry 后才会纳入排空等待，当前不能
-据此宣称所有 WebSocket 已经无中断。
+截至 2026-07-31（Asia/Tokyo），应用源码中的 `/livez` 只证明进程 HTTP listener 可响应；
+`/readyz` 会在同一个有界 probe context 内检查初始化、drain、进程角色、worker fencing
+lease、PostgreSQL、Redis、migration checksum，以及 worker 角色的 scheduler 首次 rebuild。
+probe 响应只输出 `ok`/`failed`，不会回传可能含连接信息的底层错误。该源码事实不自动证明
+已经部署到生产；生产事实仍须从私有 release manifest 和 running artifact 闭环核对。
+
+SIGTERM 会先令 `/readyz` 失败并拒绝新请求，再在配置的 shutdown 总预算内调用
+`http.Server.Shutdown` 和等待活动 handler。普通 HTTP/SSE 由 request registry 与
+`net/http` 共同管理；当前所有应用内 WebSocket upgrade 路径（OpenAI Responses、Live
+sideband 和管理面 QPS）还会单独登记 hijacked socket。应用从总预算中预留最多 1 秒，
+用于到期后强制关闭 socket 并等待 handler 提交尾部 usage；客户端必须重连，不能把该行为
+描述成 WebSocket 无中断迁移。若该收尾窗口仍超时，应用会记录残留 request/connection
+数量；在候选演练证明之前不能宣称尾部写入零丢失。
+
+请求排空后，应用清理按 `usage-record worker pool -> billing-cache async writes -> deferred
+quota final flush` 严格串行，再并行停止其余独立后台服务，最后关闭 Redis 与 Ent client。
+幂等请求记录在请求事务路径同步落库，不存在额外的进程内 idempotency 写队列；
+`IdempotencyCleanupService` 只是历史记录清理任务。多数旧 service 的 `Stop()` 尚未接受
+context，因此完整应用清理仍没有统一硬时限；systemd/container 的最终停止上限和生产实际
+排空耗时必须通过候选演练测量，不能从 HTTP shutdown timeout 推算。
+
+截至 2026-07-22 的 `v0.1.163` integration candidate 进一步加入显式 `active`、`standby`、`worker`、
+`api`、`migrator` 角色、migration-only 启动、Redis worker lease/fencing token 和 scheduler
+首次 rebuild readiness。以上仍是未部署候选事实，不代表生产已启用双 Center；完整边界和
+人工切换顺序见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)。
 
 截至 2026-07-13，当前部署版本存在以下边界：
 
@@ -70,7 +89,10 @@ readiness 必须快速、有超时、无副作用，不能在每个 probe 中做
 - systemd、容器、ASG lifecycle hook 和 ALB deregistration timeout 要相互一致；
 - 新请求在 drain 开始后不能再进入旧实例；
 - SSE/WebSocket 客户端必须支持断线重连；长连接无法仅靠负载均衡器获得绝对无感迁移；
-- 计费写入、用量日志和幂等状态必须在退出前 flush 或通过数据库幂等恢复。
+- 计费写入与用量日志必须按 producer/consumer 顺序 flush；幂等状态必须同步持久化或通过
+  数据库幂等恢复；
+- 候选演练必须分别记录 ALB deregistration、HTTP/SSE 排空、WebSocket 强制断开和应用清理
+  的实际耗时，不能只记录 systemd 最终退出时间。
 
 ## 新旧版本并存契约
 

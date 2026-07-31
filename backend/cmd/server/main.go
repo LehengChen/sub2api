@@ -177,13 +177,38 @@ func runMainServer() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
+	app.Health.BeginDrain()
+	log.Println("Server is draining...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	shutdownTimeout := app.Health.ShutdownTimeout()
+	overallCtx, cancelOverall := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelOverall()
+	overallDeadline, _ := overallCtx.Deadline()
+	forceCloseGrace := time.Second
+	if shutdownTimeout <= 2*forceCloseGrace {
+		forceCloseGrace = shutdownTimeout / 2
+	}
+	gracefulCtx, cancelGraceful := context.WithDeadline(context.Background(), overallDeadline.Add(-forceCloseGrace))
+	defer cancelGraceful()
 
-	if err := app.Server.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
+	shutdownErr := app.Server.Shutdown(gracefulCtx)
+	if shutdownErr != nil {
+		log.Printf("Graceful shutdown deadline reached: %v", shutdownErr)
+	}
+	drainErr := app.Health.WaitForDrain(gracefulCtx)
+	if drainErr != nil {
+		log.Printf("Long-lived connection drain deadline reached: %v (requests=%d connections=%d)", drainErr, app.Health.ActiveRequests(), app.Health.ActiveConnections())
+	}
+	if shutdownErr != nil || drainErr != nil {
+		if closeErr := app.Health.CloseLongLivedConnections(); closeErr != nil {
+			log.Printf("Forced long-lived connection close failed: %v", closeErr)
+		}
+		if closeErr := app.Server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			log.Printf("Forced server close failed: %v", closeErr)
+		}
+		if err := app.Health.WaitForDrain(overallCtx); err != nil {
+			log.Printf("Forced drain completion deadline reached: %v (requests=%d connections=%d)", err, app.Health.ActiveRequests(), app.Health.ActiveConnections())
+		}
 	}
 
 	log.Println("Server exited")
