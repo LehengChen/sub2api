@@ -43,6 +43,16 @@ assert_line Dockerfile.goreleaser 'ARG POSTGRES_IMAGE=postgres:18-alpine@sha256:
 assert_line backend/Dockerfile 'ARG GOLANG_IMAGE=golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2'
 assert_line Dockerfile.goreleaser 'COPY --chown=sub2api:sub2api backend/resources /app/resources'
 assert_line deploy/Dockerfile 'COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources'
+assert_line Dockerfile '    CMD wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/livez || exit 1'
+assert_line deploy/Dockerfile '    CMD wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/livez || exit 1'
+for compose_file in \
+  deploy/docker-compose.yml \
+  deploy/docker-compose.local.yml \
+  deploy/docker-compose.dev.yml \
+  deploy/docker-compose.standalone.yml; do
+  grep -F 'http://localhost:8080/readyz' "$compose_file" >/dev/null || \
+    fail "$compose_file must use /readyz for service health"
+done
 assert_count .goreleaser.yaml '      - backend/resources' 4
 assert_count .goreleaser.simple.yaml '      - backend/resources' 1
 
