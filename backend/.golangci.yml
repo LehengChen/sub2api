@@ -25,6 +25,12 @@ linters:
             - "!**/internal/service/ops_metrics_collector.go"
             - "!**/internal/service/ops_scheduled_report_service.go"
             - "!**/internal/service/wire.go"
+            # These two files are deliberately infrastructure adapters: they
+            # own the Redis lease/session protocol while exposing interfaces to
+            # the rest of the service layer. Keep the broader service rule
+            # closed to accidental Redis imports.
+            - "!**/internal/service/worker_fence.go"
+            - "!**/internal/service/oauth_session_store.go"
           deny:
             - pkg: github.com/Wei-Shaw/sub2api/internal/repository
               desc: "service must not import repository"
