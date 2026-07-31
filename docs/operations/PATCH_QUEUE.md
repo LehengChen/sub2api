@@ -20,6 +20,7 @@ commit 和可重复计算的 stable patch-id。
 | FZ-006 | `reimplement` | `6b0bf99da9380cca4f3c45d9a36b29c425c72149` / `a0bedb66b091548f3d24a1573e0aff53997c2e1e` | OAuth/session 必须跨 Center 共享；候选使用受控 Redis store，兼容性仍需双实例 start/callback 演练。 | upstream 提供等价外部化 session 且 N/N-1 测试通过。 |
 | FZ-007 | `reimplement` | `8ef0277d0a18cc38d20a4783385c6c7de8f6e781` / `70245a28a377d3c1aaedaf3359950f48a2c1c482`；`15218a20ccaefa4110725406858b9025324b92ed` / `928c5f9742f3a16cfac42b595cfa295db34e60b0` | 显式 process role、worker lease/fencing、migration-only 启动和 standby startup worker gate 是 Frenzy 运行边界；当前只允许人工主备，不开启 active-active。 | 所有关键写路径 fencing、共享状态和故障演练通过后才可扩大能力。 |
 | FZ-008 | `reimplement` | `f37abee8b1ccb2fcd5746690b7fbd68df3ed0ee4` / `14c320693cd8eedd3267f3eca38731567e1b1eac` | 每一跳 redirect 都重新执行 scheme、host allowlist、userinfo、端口和私网 DNS 校验；安全约束不能依赖首跳。 | upstream 等价实现并完成网关转发与 DNS TOCTOU 审计。 |
+| FZ-009 | `reimplement` | `af23695b003d35286d208fc8e07a3aa247779b0c` / `af8841ca825c84bfc7a302176377036745ba7708` | 应用、GoReleaser 和开发 Dockerfile 固定 Dockerfile frontend、Node、Go、Alpine、PostgreSQL multi-architecture digest，并把根构建 pnpm 固定为 9.15.9；生产 publisher 仍需在私有 ops 显式覆盖和记录获准 digest。 | upstream 提供等价 immutable build-input policy；Alpine package snapshot、provenance statement policy 和签名仍须另行完成。 |
 
 ### 集成附加提交
 
@@ -28,6 +29,7 @@ commit 和可重复计算的 stable patch-id。
 - `569771c4149c5f4efce2727a4881472e7347824a` / `627424b972656c56c69654c34877e1668de62480`：登记所有现有 WebSocket upgrade、强制断连并按 usage/billing/quota 顺序收尾（FZ-005）。
 - `4cfdbfce60284b619227433b3da78051a5cac8a1` / `aa68439ae75fa19a9eab66a3c41dd2ec4bd69035`：容器 liveness 固定使用 `/livez`，Compose/Caddy 流量健康固定使用 `/readyz`，并保留 `/health` 兼容别名（FZ-005）。
 - `15218a20ccaefa4110725406858b9025324b92ed` / `928c5f9742f3a16cfac42b595cfa295db34e60b0`：standby 构造路径不启动后台 worker，并扩展 WorkerFence 失租测试（FZ-007）。
+- `af23695b003d35286d208fc8e07a3aa247779b0c` / `af8841ca825c84bfc7a302176377036745ba7708`：基础镜像和 pnpm 构建输入固定到已核验版本/digest，降低同一源码重建漂移；未把 APK repository 描述为 hermetic（FZ-009）。
 - `8ef96178887753cfecb925addc6ab10d661af3fb` / `dc5a4ba48482be28e8348e530db37e16fd051397`：Wire/Ent 生成输出和回滚 API timeout 测试同步；生成器重跑已通过。
 - `backend/cmd/server/VERSION` 从 upstream tag 内的 `0.1.168` 规范化为 `0.1.169`，避免控制台把正式 v0.1.169 误报为旧版本；该变更必须随候选源码 SHA 一起审查。
 

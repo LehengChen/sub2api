@@ -1,23 +1,24 @@
 # v0.1.169 Upstream 集成兼容性记录
 
-状态：`integration`，不可 promotion。观察时区：`Asia/Tokyo`；观察日期：2026-07-31。
+状态：`integration`，不可 promotion。观察时区：`Asia/Tokyo`；观察日期：2026-08-01。
 本记录描述源码集成和验证边界，不代表生产已更新。生产部署仍必须从私有 ops 的
 stable release manifest 闭环 `app tag -> source SHA -> image digest -> config revision -> ops revision`。
 
 ## 身份
 
 ```yaml
-observed_at_utc: 2026-07-31
+observed_at_tokyo: 2026-08-01
 old_app_tag: frenzy/app/v0.1.151-e316ebf5.1
 old_app_sha: 3c39b35c81b8e4664d9110b9e68939c66b263817
 old_upstream_base: e316ebf52838a89d57fc790981cce7520f819ac8
 target_upstream_tag: v0.1.169
 target_tag_object: 830b5f507396b858874b171feae1cbcfce1caded
 target_peeled_commit: 26d894ef4f50645a4bf1030e378ac892f17d0223
-candidate_sha: not-frozen-integration
+candidate_tag: frenzy/candidate/0.1.169-frenzy.6
+candidate_sha: af23695b003d35286d208fc8e07a3aa247779b0c
 integration_branch: integration/v0.1.169-frenzy.1
 release_branch: not-created
-patch_decisions: FZ-001..FZ-008 documented in PATCH_QUEUE.md
+patch_decisions: FZ-001..FZ-009 documented in PATCH_QUEUE.md
 reviewer: Frenzy maintenance agent
 ```
 
@@ -80,7 +81,7 @@ reviewer: Frenzy maintenance agent
 | 后台 cron/worker/leader lock | FZ-007 已将启动门禁扩展到 email、billing-cache、content moderation、subscription maintenance、usage-record pool 和 upstream account probes；仍只有 lease/失租排空证据，关键写入的 token fencing、双进程 integration 和幂等性尚未完成，自动 failover 关闭。 |
 | SSE/WebSocket/HTTP2/TLS | bounded drain 已实现；当前 OpenAI Responses、Live sideband 和管理面 QPS WebSocket 均注册到长连接 registry，超时会强制断开并等待尾部 usage 收尾。客户端仍需重连，不能宣称绝对无中断；真实 ALB 测量待做。 |
 | upstream URL/redirect/DNS | FZ-008 每跳重新校验 allowlist、HTTPS、端口、userinfo 和私网 DNS；未列出的 host 必须拒绝，需真实网关/出口测试。 |
-| 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck、完整 Vitest（197 files/1356 tests）和生产构建已通过；`xlsx@0.18.5` 已替换为 `@e965/xlsx@0.20.3`，生产依赖审计结果为 high/critical 0（仍有 low 8、moderate 29）；完整 amd64 镜像与容器扫描仍是 release gate。 |
+| 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck、完整 Vitest（197 files/1356 tests）和先前候选生产构建已通过；`xlsx@0.18.5` 已替换为 `@e965/xlsx@0.20.3`，生产依赖审计结果为 high/critical 0（仍有 low 8、moderate 29）。FZ-009 又把 Dockerfile frontend、Node、Go、Alpine、PostgreSQL 固定到 multi-architecture digest，把 pnpm 固定为 9.15.9；`.6` 已通过 Docker build check，完整 amd64 build/scan/CI 仍须绑定该 tag 重跑。 |
 
 ### 不能从当前静态实现推导的能力
 
@@ -89,7 +90,7 @@ reviewer: Frenzy maintenance agent
 
 ## Patch 处置
 
-详见 [`PATCH_QUEUE.md`](PATCH_QUEUE.md) 的 v0.1.169 表。八项均为 carry/reimplement/recalculate，当前没有任何一项可视为已由 upstream 自动吸收。
+详见 [`PATCH_QUEUE.md`](PATCH_QUEUE.md) 的 v0.1.169 表。九项均为 carry/reimplement/recalculate，当前没有任何一项可视为已由 upstream 自动吸收。
 
 ## 已完成验证与缺口
 
@@ -103,13 +104,12 @@ frontend_full_test_build: passed (197 files / 1356 tests; production build)
 golangci_lint: passed with v2.9.0; 0 issues
 govulncheck: passed (0 vulnerabilities in reachable code/imports; 3 required-but-not-called modules remain)
 dependency_audit: high/critical 0; low 8, moderate 29; pnpm audit exits non-zero for remaining advisories
-container_scan: previous amd64 candidate Inspector scan found one active MEDIUM
-  CVE-2026-41178 in go.opentelemetry.io/otel v1.41.0 (fixed in v1.44.0);
-  dependency was upgraded in the follow-up security patch and the image must be
-  rebuilt and rescanned before promotion
-linux_amd64_image: passed for immutable build-only candidate frenzy/candidate/0.1.169-frenzy.1
-ci: passed for candidate source f632528563cf57ec7fdbefb7221d1a770ab88cc9
-sbom_provenance: BuildKit SBOM and mode=max provenance generated; private registry identity is recorded only in ops
+container_scan: pending for .6; earlier MEDIUM CVE-2026-41178 was removed from
+  the source dependency graph by the v1.44.0 OpenTelemetry update, but only a
+  scan bound to the new registry digest can close this gate
+linux_amd64_image: Docker build check passed for .6 pinned inputs; full registry build pending
+ci: .5 passed all tag CI and security jobs; .6 rerun pending for FZ-009
+sbom_provenance: required from the private artifact publisher for .6; registry digest/referrer pending
 migration_rehearsal: not-run; required before approval
 proxy_group_billing_e2e: not-run against real gateway/egress
 claude_synthetic: not-run
@@ -120,14 +120,16 @@ deployment_strategy: maintenance-window until rolling contract passes
 stop_conditions: missing candidate digest, migration rehearsal, real readiness, synthetic, or reviewed ops plan
 
 production_image_contract: root Dockerfile OCI metadata must identify the
-  LehengChen fork, full source SHA, v0.1.169 version and UTC build timestamp;
-  the production linux/amd64 build overrides POSTGRES_IMAGE to
-  postgres:16.14-alpine so migration/backup clients match the production RDS
-  major version. This does not change the upstream PostgreSQL 18 development
-  compose baseline.
+  LehengChen fork, full source SHA, v0.1.169 version and source timestamp;
+  Dockerfile frontend, Node, Go, Alpine and PostgreSQL bases are digest pinned,
+  pnpm is exactly 9.15.9, and the private production publisher overrides the
+  PostgreSQL base to an approved PostgreSQL 16.14 digest so migration/backup
+  clients match the production RDS major. This does not change the PostgreSQL
+  18 development Compose baseline. Alpine package repositories are not yet
+  snapshot pinned, so this is not a fully hermetic rebuild claim.
 observation_window: not-started
-final_decision: candidate superseded by the OpenTelemetry security rebuild; no
-  release/tag/promotion until the new immutable digest, scan and migration gates
+final_decision: .6 candidate frozen for CI/artifact validation only; no
+  promotion until its immutable registry digest, scan, migration and live gates
   are recorded
 ```
 
