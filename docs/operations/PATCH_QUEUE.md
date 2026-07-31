@@ -14,7 +14,7 @@ commit 和可重复计算的 stable patch-id。
 |---|---|---|---|---|
 | FZ-001 | `reimplement` | `22fbd18ef90607facfa2782c7b40982a820549a9` / `b676c2495ff399d2ae5b1fe2b4fdf0fa01a61204` | upstream v0.1.169 没有 Frenzy 的出口 HTTPS-only probe 约束；保留 fail-closed probe 与定向测试。 | upstream 提供等价 HTTPS-only 行为并通过固定出口 synthetic 后重新计算。 |
 | FZ-002 | `reimplement` | `081d44d7f8647771df6ca91ffdf860131c39f81d` / `c28d9bb835a86e352b1d04277ec7a0dc925fe2a0` | upstream pricing fallback 资源已变化，不能机械 cherry-pick；候选保留无公网定价模式和离线测试。 | upstream 提供完整、可审计且不要求 Center 直连公网的定价同步。 |
-| FZ-003 | `recalculate` | `58ece1bceca43a044a7f130cb49fbde525e7d53a` / `2d7a2ca2a67b3b5fddd772a1601c7f79e2c46da0`；`2121caba55d254b82d251d7e02a6b3ea1c276a6f` / `4bb46028f20708712f77a0411c4ad76a0ebcc667`；`615a3a923c54e8c91f7fa0f73a09e3377b61a5c7` / `643fd0768cb6f2ef3b105ffe6d380018df3e273f`；`e306ebdf5466a354ee6ef28cff02e030f80d7963` / `614268256ee56463b99850e4147c2933dc9cf44c` | v0.1.169 已更新部分依赖；候选重新计算 Go/Node 依赖，移除高危 `xlsx@0.18.5` 并替换为 `@e965/xlsx@0.20.3`，同时保留 Wire 校验依赖和非事务 migration invalid-index 重试，不能把旧 lockfile 当永久 patch。 | govulncheck、依赖审计和镜像扫描绑定候选 digest 后，逐项 drop 或重写；migration runner 重试逻辑需保留独立验证。 |
+| FZ-003 | `recalculate` | `58ece1bceca43a044a7f130cb49fbde525e7d53a` / `2d7a2ca2a67b3b5fddd772a1601c7f79e2c46da0`；`2121caba55d254b82d251d7e02a6b3ea1c276a6f` / `4bb46028f20708712f77a0411c4ad76a0ebcc667`；`615a3a923c54e8c91f7fa0f73a09e3377b61a5c7` / `643fd0768cb6f2ef3b105ffe6d380018df3e273f`；`e306ebdf5466a354ee6ef28cff02e030f80d7963` / `614268256ee56463b99850e4147c2933dc9cf44c`；`3f05cc0d3d03eaef7e018110c76116b3fba551ef` / `b504da587150847d89b1f8857b90575c18acf270` | v0.1.169 已更新部分依赖；候选重新计算 Go/Node 依赖，移除高危 `xlsx@0.18.5` 并替换为 `@e965/xlsx@0.20.3`，并将 Inspector 报告的 `go.opentelemetry.io/otel` 中危漏洞从 v1.41.0 升级到 v1.44.0。候选不能把旧 lockfile 或旧镜像扫描当永久 patch。 | govulncheck、依赖审计和镜像扫描绑定新的候选 digest 后，逐项 drop 或重写；migration runner 重试逻辑需保留独立验证。 |
 | FZ-004 | `reimplement` | `e35b16c9a91f7d341132c7668494423a9c09e85d` / `707bb8053c5d4bcb43439c949c90b55138bf8163`；`3b905270147e80507f34b6e86b2b9f537fe8a1b2` / `48c693b8ffa76f1fcd29b2ae5d8365d39d5c4456` | AWS/私有 catalog 是外部运维边界；版本检查可以只读，但应用内替换/回滚在 externally managed 模式必须禁用。 | 私有 ops catalog、digest/provenance 和外部 controller 已获批并覆盖同等能力后重审。 |
 | FZ-005 | `reimplement` | `281d7517f9612eb97b290ef7790c7051b45edeb5` / `36c5ccf56825d4ca38ba7dcc8cf49199e6a7b29a`；`27c5c6605fd582cff31ec871136d2856347c8f73` / `90941563989f468d721fd5d4783058bcf205ab6c` | `/livez`、真实 `/readyz`、bounded drain 和 migration readiness 是多 Center 前置条件；不能由 upstream 健康路径替代。 | upstream 等价实现完成真实 ALB/SSE/WebSocket/认证 synthetic 验收后重审。 |
 | FZ-006 | `reimplement` | `6b0bf99da9380cca4f3c45d9a36b29c425c72149` / `a0bedb66b091548f3d24a1573e0aff53997c2e1e` | OAuth/session 必须跨 Center 共享；候选使用受控 Redis store，兼容性仍需双实例 start/callback 演练。 | upstream 提供等价外部化 session 且 N/N-1 测试通过。 |
@@ -86,7 +86,7 @@ order: 30
 status: recalculate
 original_commit: 3c39b35c81b8e4664d9110b9e68939c66b263817
 stable_patch_id: 832b2eb8f0baacd9be76a430d62fa9ee45b917dd
-last_reviewed_against: e316ebf52838a89d57fc790981cce7520f819ac8
+last_reviewed_against: f632528563cf57ec7fdbefb7221d1a770ab88cc9
 upstream_issue_or_pr: none
 ```
 
@@ -94,6 +94,7 @@ upstream_issue_or_pr: none
 - Invariant：生产 candidate 不包含未接受、未到期例外覆盖的可利用高危/严重运行依赖漏洞。
 - Paths：`backend/go.mod`、`backend/go.sum`。
 - Tests：unit/integration、编译、govulncheck、容器 Inspector。
+- 2026-08-01 Inspector 对候选 amd64 工件发现 `CVE-2026-41178`（MEDIUM，`go.opentelemetry.io/otel` v1.41.0，修复版本 v1.44.0）；本次候选已升级 core/metric/sdk/trace 到 v1.44.0，并需重建、重新扫描和重新记录 digest。
 - Drop condition：目标 upstream 依赖树已包含等价或更高修复，且重新扫描通过。
 - Next sync：对目标 upstream 重新计算依赖修复，不永久重放这个 lockfile patch。
 
