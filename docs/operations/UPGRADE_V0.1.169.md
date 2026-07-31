@@ -113,6 +113,13 @@ old_new_coexistence: not-proven
 rollback_class: database-restore-required-or-maintenance-window
 deployment_strategy: maintenance-window until rolling contract passes
 stop_conditions: missing candidate digest, migration rehearsal, real readiness, synthetic, or reviewed ops plan
+
+production_image_contract: root Dockerfile OCI metadata must identify the
+  LehengChen fork, full source SHA, v0.1.169 version and UTC build timestamp;
+  the production linux/amd64 build overrides POSTGRES_IMAGE to
+  postgres:16.14-alpine so migration/backup clients match the production RDS
+  major version. This does not change the upstream PostgreSQL 18 development
+  compose baseline.
 observation_window: not-started
 final_decision: candidate only; no release/tag/promotion
 ```
