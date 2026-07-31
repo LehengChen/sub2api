@@ -18,6 +18,24 @@
 
 当前 release branch 在 deployed source 后还有纯文档提交；它们没有进入运行镜像。因此所有 range-diff、patch count 和升级基线必须从 deployed application tag 计算，不能从 branch `HEAD` 计算。
 
+## 2026-07-31 目标集成只读观察（Asia/Tokyo）
+
+本节记录本次 v0.1.169 集成的输入，不是生产批准或运行事实。
+
+| 项目 | 值 |
+|---|---|
+| deployed application tag（仍为 stable） | `frenzy/app/v0.1.151-e316ebf5.1` |
+| deployed source（仍为 stable） | `3c39b35c81b8e4664d9110b9e68939c66b263817` |
+| old upstream base | `e316ebf52838a89d57fc790981cce7520f819ac8` |
+| target upstream tag | `v0.1.169` |
+| target tag object | `830b5f507396b858874b171feae1cbcfce1caded` |
+| target peeled commit | `26d894ef4f50645a4bf1030e378ac892f17d0223` |
+| integration branch | `integration/v0.1.169-frenzy.1` |
+| candidate state | integration only；尚未冻结 release SHA、镜像 digest 或 ops revision |
+| version file | 本地候选规范化为 `0.1.169`；upstream tag 内仍为 `0.1.168`，差异已在兼容性报告记录 |
+
+目标 tag 通过 `refs/tags/upstream/v0.1.169` 保存，未对 upstream 开启 push。上述 SHA 只描述源码输入；不代表 ECR 工件、配置 revision、数据库 schema 或生产 running artifact 已更新。
+
 ## 下一次升级已知关注点
 
 - 三个本地 patch 尚未被 `git cherry` 判定为 upstream 等价补丁。

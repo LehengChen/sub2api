@@ -2,6 +2,31 @@
 
 本文件只记录当前已部署应用相对 upstream base 的运行时差异。纯文档、CI 和 ops 提交不计入 patch queue。每个差异使用稳定 Patch ID；commit SHA 会在 reimplement/cherry-pick 后变化，Patch ID 与行为不变量不变。
 
+## v0.1.169 集成处置（2026-07-31，Asia/Tokyo）
+
+以下结论针对 `refs/tags/upstream/v0.1.169`（peeled
+`26d894ef4f50645a4bf1030e378ac892f17d0223`），不是生产批准。当前 integration
+仍没有 immutable release tag、镜像 digest 或私有 ops revision；任何一项缺失都禁止
+promotion。`original_commit` 保留历史来源，`applied_commit` 是本次候选中实际承载
+行为的 commit。
+
+| Patch ID | 处置 | applied commit | 证据/理由 | 删除或重审条件 |
+|---|---|---|---|---|
+| FZ-001 | `reimplement` | `22fbd18ef90607facfa2782c7b40982a820549a9` | upstream v0.1.169 没有 Frenzy 的出口 HTTPS-only probe 约束；保留 fail-closed probe 与定向测试。 | upstream 提供等价 HTTPS-only 行为并通过固定出口 synthetic 后重新计算。 |
+| FZ-002 | `reimplement` | `081d44d7f8647771df6ca91ffdf860131c39f81d` | upstream pricing fallback 资源已变化，不能机械 cherry-pick；候选保留无公网定价模式和离线测试。 | upstream 提供完整、可审计且不要求 Center 直连公网的定价同步。 |
+| FZ-003 | `recalculate` | `58ece1bceca43a044a7f130cb49fbde525e7d53a`、`2121caba55d254b82d251d7e02a6b3ea1c276a6f` | v0.1.169 已更新部分依赖；候选仅保留重新扫描所需的安全修订和 Wire 校验依赖，不能把旧 lockfile 当永久 patch。 | govulncheck、依赖审计和镜像扫描绑定候选 digest 后，逐项 drop 或重写。 |
+| FZ-004 | `reimplement` | `e35b16c9a91f7d341132c7668494423a9c09e85`、`3b905270147e80507f34b6e86b2b9f537fe8a1b2` | AWS/私有 catalog 是外部运维边界；版本检查可以只读，但应用内替换/回滚在 externally managed 模式必须禁用。 | 私有 ops catalog、digest/provenance 和外部 controller 已获批并覆盖同等能力后重审。 |
+| FZ-005 | `reimplement` | `281d7517f9612eb97b290ef7790c7051b45edeb5`、`27c5c6605fd582cff31ec871136d2856347c8f73` | `/livez`、真实 `/readyz`、bounded drain 和 migration readiness 是多 Center 前置条件；不能由 upstream 健康路径替代。 | upstream 等价实现完成真实 ALB/SSE/WebSocket/认证 synthetic 验收后重审。 |
+| FZ-006 | `reimplement` | `6b0bf99da9380cca4f3c45d9a36b29c425c72149` | OAuth/session 必须跨 Center 共享；候选使用受控 Redis store，兼容性仍需双实例 start/callback 演练。 | upstream 提供等价外部化 session 且 N/N-1 测试通过。 |
+| FZ-007 | `reimplement` | `8ef0277d0a18cc38d20a4783385c6c7de8f6e781` | 显式 process role、worker lease/fencing、migration-only 启动是 Frenzy 运行边界；当前只允许人工主备，不开启 active-active。 | 所有关键写路径 fencing、共享状态和故障演练通过后才可扩大能力。 |
+| FZ-008 | `reimplement` | `f37abee8b1ccb2fcd5746690b7fbd68df3ed0ee4` | 每一跳 redirect 都重新执行 scheme、host allowlist、userinfo、端口和私网 DNS 校验；安全约束不能依赖首跳。 | upstream 等价实现并完成网关转发与 DNS TOCTOU 审计。 |
+
+### 集成附加提交
+
+- `615a3a923c54e8c91f7fa0f73a09e3377b61a5c7`：非事务并发索引失败后的 invalid-index 清理/重试。
+- `8ef961788`：Wire/Ent 生成输出和回滚 API timeout 测试同步；生成器重跑已通过。
+- `backend/cmd/server/VERSION` 从 upstream tag 内的 `0.1.168` 规范化为 `0.1.169`，避免控制台把正式 v0.1.169 误报为旧版本；该变更必须随候选源码 SHA 一起审查。
+
 ## 已部署基线
 
 观察日期：2026-07-13
