@@ -71,3 +71,38 @@ func TestLiveLeaseExpiresWithoutRefresh(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, refreshed)
 }
+
+func TestConcurrencySlotsAreSharedAcrossCenterClients(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	clientA := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	clientB := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = clientA.Close() })
+	t.Cleanup(func() { _ = clientB.Close() })
+
+	centerA := NewConcurrencyCache(clientA, 15, 900)
+	centerB := NewConcurrencyCache(clientB, 15, 900)
+	ctx := context.Background()
+
+	accountAcquired, err := centerA.AcquireAccountSlot(ctx, 1001, 1, "center-a-account")
+	require.NoError(t, err)
+	require.True(t, accountAcquired)
+	accountAcquired, err = centerB.AcquireAccountSlot(ctx, 1001, 1, "center-b-account")
+	require.NoError(t, err)
+	require.False(t, accountAcquired, "center B must observe center A's account slot")
+
+	userAcquired, err := centerA.AcquireUserSlot(ctx, 2001, 1, "center-a-user")
+	require.NoError(t, err)
+	require.True(t, userAcquired)
+	userAcquired, err = centerB.AcquireUserSlot(ctx, 2001, 1, "center-b-user")
+	require.NoError(t, err)
+	require.False(t, userAcquired, "center B must observe center A's user slot")
+
+	require.NoError(t, centerA.ReleaseAccountSlot(ctx, 1001, "center-a-account"))
+	require.NoError(t, centerA.ReleaseUserSlot(ctx, 2001, "center-a-user"))
+	accountAcquired, err = centerB.AcquireAccountSlot(ctx, 1001, 1, "center-b-account")
+	require.NoError(t, err)
+	require.True(t, accountAcquired, "released account capacity must become available to center B")
+	userAcquired, err = centerB.AcquireUserSlot(ctx, 2001, 1, "center-b-user")
+	require.NoError(t, err)
+	require.True(t, userAcquired, "released user capacity must become available to center B")
+}
