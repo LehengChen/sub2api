@@ -509,6 +509,7 @@ type ContentModerationService struct {
 	httpClient               *http.Client
 	moderationProxyCache     atomic.Pointer[moderationProxyURLCacheEntry]
 	asyncQueue               chan contentModerationTask
+	workersDisabled          bool
 	workerCount              int
 	apiKeyCursor             atomic.Uint64
 	asyncActive              atomic.Int64
@@ -580,6 +581,19 @@ func NewContentModerationService(
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
 ) *ContentModerationService {
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, true)
+}
+
+func newContentModerationService(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	startWorkers bool,
+) *ContentModerationService {
 	svc := &ContentModerationService{
 		settingRepo:          settingRepo,
 		repo:                 repo,
@@ -592,9 +606,10 @@ func NewContentModerationService(
 		httpClient:           servertiming.InstrumentClient(nil),
 		workerCount:          maxContentModerationWorkerCount,
 		asyncQueue:           make(chan contentModerationTask, maxContentModerationQueueSize),
+		workersDisabled:      !startWorkers,
 		keyHealth:            make(map[string]*contentModerationKeyHealth),
 	}
-	if settingRepo != nil && repo != nil {
+	if startWorkers && settingRepo != nil && repo != nil {
 		for i := 0; i < svc.workerCount; i++ {
 			go svc.worker(i)
 		}
@@ -1157,7 +1172,7 @@ func (s *ContentModerationService) recordPreBlockSyncMetric(latencyMS int, actio
 }
 
 func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string) {
-	if s == nil || s.asyncQueue == nil {
+	if s == nil || s.workersDisabled || s.asyncQueue == nil {
 		return
 	}
 	queueSize := defaultContentModerationQueueSize
@@ -1185,7 +1200,7 @@ func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInpu
 }
 
 func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInput, cfg *ContentModerationConfig, log *ContentModerationLog, inputHash string, recordHash bool, applySideEffects bool) {
-	if s == nil || s.asyncQueue == nil || log == nil {
+	if s == nil || s.workersDisabled || s.asyncQueue == nil || log == nil {
 		return
 	}
 	queueSize := defaultContentModerationQueueSize

@@ -425,12 +425,13 @@ func ProvideOllamaCloudUsageService(
 	cfg *config.Config,
 	lockCache LeaderLockCache,
 	db *sql.DB,
+	fence *WorkerFence,
 ) *OllamaCloudUsageService {
 	keyConfigured := cfg != nil && cfg.Totp.EncryptionKeyConfigured
 	svc := NewOllamaCloudUsageService(accountRepo, httpUpstream, settingService, encryptor, keyConfigured)
 	svc.lockCache = lockCache
 	svc.db = db
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
