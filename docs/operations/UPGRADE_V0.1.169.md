@@ -103,7 +103,10 @@ frontend_full_test_build: passed (197 files / 1356 tests; production build)
 golangci_lint: passed with v2.9.0; 0 issues
 govulncheck: passed (0 vulnerabilities in reachable code/imports; 3 required-but-not-called modules remain)
 dependency_audit: high/critical 0; low 8, moderate 29; pnpm audit exits non-zero for remaining advisories
-container_scan: GitHub Security Scan passed; private registry Inspector result remains a production gate
+container_scan: previous amd64 candidate Inspector scan found one active MEDIUM
+  CVE-2026-41178 in go.opentelemetry.io/otel v1.41.0 (fixed in v1.44.0);
+  dependency was upgraded in the follow-up security patch and the image must be
+  rebuilt and rescanned before promotion
 linux_amd64_image: passed for immutable build-only candidate frenzy/candidate/0.1.169-frenzy.1
 ci: passed for candidate source f632528563cf57ec7fdbefb7221d1a770ab88cc9
 sbom_provenance: BuildKit SBOM and mode=max provenance generated; private registry identity is recorded only in ops
@@ -123,7 +126,9 @@ production_image_contract: root Dockerfile OCI metadata must identify the
   major version. This does not change the upstream PostgreSQL 18 development
   compose baseline.
 observation_window: not-started
-final_decision: candidate only; no release/tag/promotion
+final_decision: candidate superseded by the OpenTelemetry security rebuild; no
+  release/tag/promotion until the new immutable digest, scan and migration gates
+  are recorded
 ```
 
 ## 下一步与回滚
