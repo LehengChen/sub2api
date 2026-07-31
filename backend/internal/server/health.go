@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -41,6 +42,8 @@ type HealthService struct {
 	activityMu        sync.Mutex
 	activeRequests    int64
 	activeConnections int64
+	nextConnectionID  uint64
+	connectionClosers map[uint64]func() error
 	drained           chan struct{}
 }
 
@@ -141,15 +144,16 @@ func (s *HealthService) ShutdownTimeout() time.Duration {
 }
 
 // TrackRequests records ordinary HTTP handlers. It intentionally excludes
-// health endpoints so a load balancer probe cannot keep drain open forever.
-// Hijacked WebSocket connections leave the HTTP handler before the socket is
-// closed; those handlers must use RegisterLongLivedConnection instead.
+// health endpoints so a load balancer probe cannot keep drain open forever. It
+// also exposes the long-lived connection registry to handlers that upgrade a
+// request and therefore move the socket outside net/http ownership.
 func (s *HealthService) TrackRequests() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if isHealthPath(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
+		middleware2.SetLongLivedConnectionRegistry(c, s)
 		s.beginActivity(false)
 		defer s.endActivity(false)
 		c.Next()
@@ -158,16 +162,64 @@ func (s *HealthService) TrackRequests() gin.HandlerFunc {
 
 // RegisterLongLivedConnection returns a release function for a hijacked or
 // otherwise externally managed connection (for example a WebSocket). The
-// release function is idempotent and should be deferred by the owner.
-func (s *HealthService) RegisterLongLivedConnection() func() {
+// release function is idempotent and should be deferred by the owner. closeFn
+// is invoked only when the graceful drain deadline expires.
+func (s *HealthService) RegisterLongLivedConnection(closeFn func() error) func() {
 	if s == nil {
 		return func() {}
 	}
-	s.beginActivity(true)
+	s.activityMu.Lock()
+	if s.activeRequests+s.activeConnections == 0 {
+		s.drained = make(chan struct{})
+	}
+	s.activeConnections++
+	s.nextConnectionID++
+	connectionID := s.nextConnectionID
+	if closeFn != nil {
+		if s.connectionClosers == nil {
+			s.connectionClosers = make(map[uint64]func() error)
+		}
+		s.connectionClosers[connectionID] = closeFn
+	}
+	s.activityMu.Unlock()
+
 	var once sync.Once
 	return func() {
-		once.Do(func() { s.endActivity(true) })
+		once.Do(func() {
+			s.activityMu.Lock()
+			delete(s.connectionClosers, connectionID)
+			wasActive := s.activeRequests+s.activeConnections > 0
+			if s.activeConnections > 0 {
+				s.activeConnections--
+			}
+			if wasActive && s.activeRequests+s.activeConnections == 0 {
+				close(s.drained)
+			}
+			s.activityMu.Unlock()
+		})
 	}
+}
+
+// CloseLongLivedConnections force-closes sockets that net/http cannot close
+// after hijacking. Callers use this only after the graceful drain deadline.
+func (s *HealthService) CloseLongLivedConnections() error {
+	if s == nil {
+		return nil
+	}
+	s.activityMu.Lock()
+	closers := make([]func() error, 0, len(s.connectionClosers))
+	for _, closeFn := range s.connectionClosers {
+		closers = append(closers, closeFn)
+	}
+	s.activityMu.Unlock()
+
+	var closeErrors []error
+	for _, closeFn := range closers {
+		if err := closeFn(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func (s *HealthService) beginActivity(connection bool) {

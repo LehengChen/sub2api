@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/server/routes"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -139,7 +140,7 @@ func TestTrackRequestsAndLongLivedRegistryAreBoundedByDrainWait(t *testing.T) {
 	<-started
 	require.Equal(t, 1, health.ActiveRequests())
 
-	releaseConnection := health.RegisterLongLivedConnection()
+	releaseConnection := health.RegisterLongLivedConnection(nil)
 	require.Equal(t, 1, health.ActiveConnections())
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	require.ErrorIs(t, health.WaitForDrain(ctx), context.DeadlineExceeded)
@@ -156,9 +157,40 @@ func TestTrackRequestsAndLongLivedRegistryAreBoundedByDrainWait(t *testing.T) {
 
 func TestLongLivedConnectionReleaseIsIdempotent(t *testing.T) {
 	health := newHealthService(time.Second, time.Second, nil, nil, nil)
-	release := health.RegisterLongLivedConnection()
+	release := health.RegisterLongLivedConnection(nil)
 	release()
 	release()
+	require.Equal(t, 0, health.ActiveConnections())
+}
+
+func TestCloseLongLivedConnectionsInvokesRegisteredClosers(t *testing.T) {
+	health := newHealthService(time.Second, time.Second, nil, nil, nil)
+	var closeCalls atomic.Int32
+	release := health.RegisterLongLivedConnection(func() error {
+		closeCalls.Add(1)
+		return nil
+	})
+
+	require.NoError(t, health.CloseLongLivedConnections())
+	require.Equal(t, int32(1), closeCalls.Load())
+	require.Equal(t, 1, health.ActiveConnections())
+
+	release()
+	require.Equal(t, 0, health.ActiveConnections())
+}
+
+func TestTrackRequestsExposesLongLivedConnectionRegistry(t *testing.T) {
+	health := newHealthService(time.Second, time.Second, nil, nil, nil)
+	router := gin.New()
+	router.Use(health.TrackRequests())
+	router.GET("/upgrade", func(c *gin.Context) {
+		release := middleware2.RegisterLongLivedConnection(c, nil)
+		require.Equal(t, 1, health.ActiveConnections())
+		release()
+	})
+
+	assertStatus(t, router, "/upgrade", http.StatusOK)
+	require.Equal(t, 0, health.ActiveRequests())
 	require.Equal(t, 0, health.ActiveConnections())
 }
 

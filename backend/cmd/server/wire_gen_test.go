@@ -80,6 +80,34 @@ func TestDrainAndShutdownIsBoundedAndMarksUnready(t *testing.T) {
 	}
 }
 
+func TestDrainAndShutdownForceClosesRegisteredConnectionsBeforeReturning(t *testing.T) {
+	control := runtimecontrol.Default()
+	control.InstanceID = "test-center"
+	health := server.NewHealthService(nil, nil, &config.Config{Server: config.ServerConfig{ShutdownTimeoutSeconds: 1}}, control, nil, nil)
+	health.MarkInitialized()
+
+	closed := make(chan struct{})
+	var release func()
+	release = health.RegisterLongLivedConnection(func() error {
+		close(closed)
+		release()
+		return nil
+	})
+	app := &Application{Server: &http.Server{}, Health: health, Cleanup: func() {}}
+
+	begin := time.Now()
+	drainAndShutdown(app)
+
+	require.Less(t, time.Since(begin), 1500*time.Millisecond)
+	select {
+	case <-closed:
+	default:
+		t.Fatal("registered connection was not force-closed")
+	}
+	require.Equal(t, 0, health.ActiveConnections())
+	require.NoError(t, health.WaitForDrain(context.Background()))
+}
+
 func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 	cfg := &config.Config{}
 
