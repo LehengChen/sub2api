@@ -1,6 +1,6 @@
 # v0.1.169 Upstream 集成兼容性记录
 
-状态：`integration`，不可 promotion。观察时区：`Asia/Tokyo`；观察日期：2026-08-01。
+状态：源码已冻结，ECR 工件待独立闭环。观察时区：`Asia/Tokyo`；观察日期：2026-08-02。
 本记录描述源码集成和验证边界，不代表生产已更新。生产部署仍必须从私有 ops 的
 stable release manifest 闭环 `app tag -> source SHA -> image digest -> config revision -> ops revision`。
 
@@ -14,10 +14,11 @@ old_upstream_base: e316ebf52838a89d57fc790981cce7520f819ac8
 target_upstream_tag: v0.1.169
 target_tag_object: 830b5f507396b858874b171feae1cbcfce1caded
 target_peeled_commit: 26d894ef4f50645a4bf1030e378ac892f17d0223
-candidate_tag: frenzy/candidate/0.1.169-frenzy.6
-candidate_sha: af23695b003d35286d208fc8e07a3aa247779b0c
+candidate_tag: frenzy/candidate/0.1.169-frenzy.8
+candidate_sha: c68b4c8b82d2e8005a02de8ec540589c07272ecb
 integration_branch: integration/v0.1.169-frenzy.1
-release_branch: not-created
+release_branch: release/c68b4c8b-frenzy.2
+app_tag: frenzy/app/v0.1.169-c68b4c8b.2
 patch_decisions: FZ-001..FZ-009 documented in PATCH_QUEUE.md
 reviewer: Frenzy maintenance agent
 ```
@@ -96,20 +97,20 @@ reviewer: Frenzy maintenance agent
 
 ```yaml
 backend_unit: passed `GOMAXPROCS=2 go test -tags=unit ./...`
-backend_integration: not-run against a real PostgreSQL/Redis candidate
+backend_integration: passed in GitHub CI run 30712233867
 wire_ent_generation: passed with Go 1.26.5; generated diff committed
-frontend_lint_typecheck: passed
+frontend_lint_typecheck: passed in GitHub CI run 30712233867
 frontend_targeted_tests: passed (34 tests plus capability mock regressions)
 frontend_full_test_build: passed (197 files / 1356 tests; production build)
-golangci_lint: passed with v2.9.0; 0 issues
-govulncheck: passed (0 vulnerabilities in reachable code/imports; 3 required-but-not-called modules remain)
-dependency_audit: high/critical 0; low 8, moderate 29; pnpm audit exits non-zero for remaining advisories
-container_scan: pending for .6; earlier MEDIUM CVE-2026-41178 was removed from
+golangci_lint: passed in GitHub CI run 30712233867
+govulncheck: passed in GitHub Security Scan run 30712233783
+dependency_audit: passed the repository exception policy in GitHub Security Scan run 30712233783
+container_scan: pending for .8; earlier MEDIUM CVE-2026-41178 was removed from
   the source dependency graph by the v1.44.0 OpenTelemetry update, but only a
   scan bound to the new registry digest can close this gate
-linux_amd64_image: Docker build check passed for .6 pinned inputs; full registry build pending
-ci: .5 passed all tag CI and security jobs; .6 rerun pending for FZ-009
-sbom_provenance: required from the private artifact publisher for .6; registry digest/referrer pending
+linux_amd64_image: full registry build pending for .8
+ci: .8 passed CI run 30712233867 and Security Scan run 30712233783
+sbom_provenance: required from the private artifact publisher for .8; registry digest/referrer pending
 migration_rehearsal: not-run; required before approval
 proxy_group_billing_e2e: not-run against real gateway/egress
 claude_synthetic: not-run
@@ -128,7 +129,7 @@ production_image_contract: root Dockerfile OCI metadata must identify the
   18 development Compose baseline. Alpine package repositories are not yet
   snapshot pinned, so this is not a fully hermetic rebuild claim.
 observation_window: not-started
-final_decision: .6 candidate frozen for CI/artifact validation only; no
+final_decision: .8 source frozen and CI/security green; no
   promotion until its immutable registry digest, scan, migration and live gates
   are recorded
 ```
