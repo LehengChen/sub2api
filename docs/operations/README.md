@@ -13,7 +13,11 @@
 | [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md) | 当前 deployed/upstream 差距的带日期快照 |
 | [`PATCH_QUEUE.md`](PATCH_QUEUE.md) | Frenzy runtime patch 的稳定 ID、行为不变量和删除条件 |
 | [`UPGRADE_COMPATIBILITY_TEMPLATE.md`](UPGRADE_COMPATIBILITY_TEMPLATE.md) | 每次 upstream 升级的 migration/config/回滚审查模板 |
+| [`UPGRADE_V0.1.169.md`](UPGRADE_V0.1.169.md) | v0.1.169 的最终公开 release 身份及历史候选兼容性记录 |
 | [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) | readiness、drain、N/N-1、migration 和多副本应用契约 |
+| [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md) | active/standby/migrator 角色、worker fencing 和人工冷备切换契约 |
+| [`HEALTH_AND_DRAIN.md`](HEALTH_AND_DRAIN.md) | 应用 `/livez`、`/readyz`、SIGTERM 排空和长连接注册契约 |
+| [`EXTERNAL_RELEASE_CONTROL.md`](EXTERNAL_RELEASE_CONTROL.md) | 外部运维控制、只读 release catalog、版本 API capability 与 fail-closed 契约 |
 | [`GITHUB_GOVERNANCE.md`](GITHUB_GOVERNANCE.md) | fork CI、分支/tag 保护的期望与实际状态 |
 | [`../../DEV_GUIDE.md`](../../DEV_GUIDE.md) | 本地开发示例；Git/upstream 和生产规则不在该文件定义 |
 
@@ -54,5 +58,6 @@
 - 模式语义变化时更新 `DEPLOYMENT_MODES.md`。
 - remote、branch、patch queue 或发布流程变化时更新 `UPSTREAM_MAINTENANCE.md`。
 - upstream commit/tag 的可变快照只更新 `UPSTREAM_STATUS.md`，不污染稳定流程。
-- 生产部署后更新私有 baseline 和 release manifest，不在公开文档复制生产秘密。
+- 生产部署后更新私有 baseline 和 release manifest；公开状态页只记录可公开的 app tag/source
+  与一般能力结论，不复制环境身份、artifact digest 或生产秘密。
 - 文件中出现的 commit 数和版本均须标明观察日期；它们是快照，不是永久事实。

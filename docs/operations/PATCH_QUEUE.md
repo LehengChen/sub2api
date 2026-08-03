@@ -1,8 +1,47 @@
 # Frenzy Runtime Patch Queue
 
-本文件只记录当前已部署应用相对 upstream base 的运行时差异。纯文档、CI 和 ops 提交不计入 patch queue。每个差异使用稳定 Patch ID；commit SHA 会在 reimplement/cherry-pick 后变化，Patch ID 与行为不变量不变。
+本文件记录当前发布应用相对 upstream base 的运行时差异，并保留上一部署基线的历史定义。
+纯文档、CI 和 ops 提交不计入 patch queue。每个差异使用稳定 Patch ID；commit SHA 会在
+reimplement/cherry-pick 后变化，Patch ID 与行为不变量不变。
 
-## 已部署基线
+## v0.1.169 当前发布处置（截至 2026-08-03，Asia/Tokyo）
+
+以下结论针对 `refs/tags/upstream/v0.1.169`（peeled
+`26d894ef4f50645a4bf1030e378ac892f17d0223`）。当前 immutable app tag 为
+`frenzy/app/v0.1.169-c68b4c8b.2`，source 为
+`c68b4c8b82d2e8005a02de8ec540589c07272ecb`。私有四轴证据已确认该 release source 激活；
+镜像 digest、配置 revision 和 ops revision 不在公开 patch queue 重复记录。
+
+`original_commit` 保留历史来源，下面记录最终 release source 中承载行为的 commit 和可重复
+计算的 stable patch-id。九个 Patch ID 是九个稳定行为意图，不等于只有九个 Git commit。
+
+| Patch ID | 处置 | applied commit / stable patch-id | 证据/理由 | 删除或重审条件 |
+|---|---|---|---|---|
+| FZ-001 | `reimplement` | `22fbd18ef90607facfa2782c7b40982a820549a9` / `b676c2495ff399d2ae5b1fe2b4fdf0fa01a61204` | upstream v0.1.169 没有 Frenzy 的出口 HTTPS-only probe 约束；保留 fail-closed probe 与定向测试。 | upstream 提供等价 HTTPS-only 行为并通过固定出口 synthetic 后重新计算。 |
+| FZ-002 | `reimplement` | `081d44d7f8647771df6ca91ffdf860131c39f81d` / `c28d9bb835a86e352b1d04277ec7a0dc925fe2a0` | upstream pricing fallback 资源已变化，不能机械 cherry-pick；release 保留无公网定价模式和离线测试。 | upstream 提供完整、可审计且不要求 Center 直连公网的定价同步。 |
+| FZ-003 | `recalculate` | `58ece1bceca43a044a7f130cb49fbde525e7d53a` / `2d7a2ca2a67b3b5fddd772a1601c7f79e2c46da0`；`2121caba55d254b82d251d7e02a6b3ea1c276a6f` / `4bb46028f20708712f77a0411c4ad76a0ebcc667`；`615a3a923c54e8c91f7fa0f73a09e3377b61a5c7` / `643fd0768cb6f2ef3b105ffe6d380018df3e273f`；`e306ebdf5466a354ee6ef28cff02e030f80d7963` / `614268256ee56463b99850e4147c2933dc9cf44c`；`dd73f1d7f85dbb9083d7342c343a13090b2b1f20` / `b16d37203c1fcaca2f96d320d6d1613376cad59e`；`f8c285dbd594101c9941a6270507c8dc328a2593` / `57e6c691bf1fd6cf76c84aac1d41765cd9ea8b7b` | v0.1.169 已更新部分依赖；release 重新计算 Go/Node 依赖，移除高危 `xlsx@0.18.5` 并替换为 `@e965/xlsx@0.20.3`，将 Inspector 报告的 `go.opentelemetry.io/otel` 中危漏洞从 v1.41.0 升级到 v1.44.0，并补齐 migration 190 concurrent index 的 invalid-index 清理/重试。旧 lockfile、旧镜像扫描或 mock migration 测试都不是永久证据。 | govulncheck、依赖审计和镜像扫描必须绑定每个新 release artifact 后，逐项 drop 或重写；migration runner 重试逻辑需保留生产形状演练。 |
+| FZ-004 | `reimplement` | `e35b16c9a91f7d341132c7668494423a9c09e85d` / `707bb8053c5d4bcb43439c949c90b55138bf8163`；`3b905270147e80507f34b6e86b2b9f537fe8a1b2` / `48c693b8ffa76f1fcd29b2ae5d8365d39d5c4456` | AWS/私有 catalog 是外部运维边界；版本检查可以只读，但应用内替换/回滚在 externally managed 模式必须禁用。 | 私有 ops catalog、digest/provenance 和外部 controller 已获批并覆盖同等能力后重审。 |
+| FZ-005 | `reimplement` | `281d7517f9612eb97b290ef7790c7051b45edeb5` / `36c5ccf56825d4ca38ba7dcc8cf49199e6a7b29a`；`27c5c6605fd582cff31ec871136d2856347c8f73` / `90941563989f468d721fd5d4783058bcf205ab6c`；`569771c4149c5f4efce2727a4881472e7347824a` / `627424b972656c56c69654c34877e1668de62480`；`4cfdbfce60284b619227433b3da78051a5cac8a1` / `aa68439ae75fa19a9eab66a3c41dd2ec4bd69035` | `/livez`、真实 `/readyz`、bounded drain、hijacked WebSocket 强制关闭、usage/billing/quota 有序 flush、migration readiness 和部署层 probe 分工是多 Center 前置条件；不能由 upstream 健康路径替代。 | upstream 等价实现完成真实 ALB/SSE/WebSocket/认证 synthetic 验收后重审。 |
+| FZ-006 | `reimplement` | `6b0bf99da9380cca4f3c45d9a36b29c425c72149` / `a0bedb66b091548f3d24a1573e0aff53997c2e1e` | OAuth/session 必须跨 Center 共享；release 使用受控 Redis store，兼容性仍需双实例 start/callback 演练。 | upstream 提供等价外部化 session 且 N/N-1 测试通过。 |
+| FZ-007 | `reimplement` | `8ef0277d0a18cc38d20a4783385c6c7de8f6e781` / `70245a28a377d3c1aaedaf3359950f48a2c1c482`；`15218a20ccaefa4110725406858b9025324b92ed` / `928c5f9742f3a16cfac42b595cfa295db34e60b0` | 显式 process role、worker lease/fencing、migration-only 启动和 standby startup worker gate 是 Frenzy 运行边界；当前只允许人工主备，不开启 active-active。 | 所有关键写路径 fencing、共享状态和故障演练通过后才可扩大能力。 |
+| FZ-008 | `reimplement` | `f37abee8b1ccb2fcd5746690b7fbd68df3ed0ee4` / `14c320693cd8eedd3267f3eca38731567e1b1eac` | 每一跳 redirect 都重新执行 scheme、host allowlist、userinfo、端口和私网 DNS 校验；安全约束不能依赖首跳。 | upstream 等价实现并完成网关转发与 DNS TOCTOU 审计。 |
+| FZ-009 | `reimplement` | `af23695b003d35286d208fc8e07a3aa247779b0c` / `af8841ca825c84bfc7a302176377036745ba7708` | 应用、GoReleaser 和开发 Dockerfile 固定 Dockerfile frontend、Node、Go、Alpine、PostgreSQL multi-architecture digest，并把根构建 pnpm 固定为 9.15.9；生产 publisher 仍需在私有 ops 显式覆盖和记录获准 digest。 | upstream 提供等价 immutable build-input policy；Alpine package snapshot、provenance statement policy 和签名仍须另行完成。 |
+
+### Release 附加提交
+
+- `615a3a923c54e8c91f7fa0f73a09e3377b61a5c7` / `643fd0768cb6f2ef3b105ffe6d380018df3e273f`：非事务并发索引失败后的 invalid-index 清理/重试（FZ-003）。
+- `f8c285dbd594101c9941a6270507c8dc328a2593` / `57e6c691bf1fd6cf76c84aac1d41765cd9ea8b7b`：补齐 migration 190 email alias concurrent index 的同等清理/重试（FZ-003）。
+- `569771c4149c5f4efce2727a4881472e7347824a` / `627424b972656c56c69654c34877e1668de62480`：登记所有现有 WebSocket upgrade、强制断连并按 usage/billing/quota 顺序收尾（FZ-005）。
+- `4cfdbfce60284b619227433b3da78051a5cac8a1` / `aa68439ae75fa19a9eab66a3c41dd2ec4bd69035`：容器 liveness 固定使用 `/livez`，Compose/Caddy 流量健康固定使用 `/readyz`，并保留 `/health` 兼容别名（FZ-005）。
+- `15218a20ccaefa4110725406858b9025324b92ed` / `928c5f9742f3a16cfac42b595cfa295db34e60b0`：standby 构造路径不启动后台 worker，并扩展 WorkerFence 失租测试（FZ-007）。
+- `af23695b003d35286d208fc8e07a3aa247779b0c` / `af8841ca825c84bfc7a302176377036745ba7708`：基础镜像和 pnpm 构建输入固定到已核验版本/digest，降低同一源码重建漂移；未把 APK repository 描述为 hermetic（FZ-009）。
+- `b911db348c277e01f5b41a7a2b54e7ae4e47195f` / `d77ecca5a18d3a33ddaa57b4503f62540fd21155`：生命周期 probe 路径绕过 SPA fallback，避免未知前端路由伪装健康（FZ-005）。
+- `c68b4c8b82d2e8005a02de8ec540589c07272ecb` / `195e1d150c6247ba2281b4db1248a1d3da501573`：规范化容器 entrypoint 权限，保持不可变 release 工件可启动（FZ-009）。
+- `08e207585d07f47a60655cc0e8cd3f0c5f166e49`：补充人工冷备 fencing 契约测试；这是测试证据，不新增 Patch ID。
+- `8ef96178887753cfecb925addc6ab10d661af3fb` / `dc5a4ba48482be28e8348e530db37e16fd051397`：Wire/Ent 生成输出和回滚 API timeout 测试同步；生成器重跑已通过。
+- `backend/cmd/server/VERSION` 从 upstream tag 内的 `0.1.168` 规范化为 `0.1.169`，避免控制台把正式 v0.1.169 误报为旧版本；该变更已随最终 release source 一起冻结。
+
+## 历史部署基线：v0.1.151
 
 观察日期：2026-07-13
 
@@ -13,7 +52,13 @@
 | deployed tag | `frenzy/app/v0.1.151-e316ebf5.1` |
 | runtime patch count | 3 |
 
-release 分支在 deployed source 之后还有运维文档提交。它们没有进入当前运行镜像，也不计入本表。
+当时 release 分支在 deployed source 之后还有运维文档提交。它们没有进入当时的运行镜像，
+也不计入该历史表。本节已被 v0.1.169 当前发布处置取代。
+
+### 历史 v0.1.151 Patch 定义
+
+以下 FZ-001--FZ-003 元数据是上一部署基线的原始定义，用于解释 stable Patch ID 的来源；
+当前 v0.1.169 的实际 commit/patch-id 以文首九项处置表为准。
 
 ## FZ-001：HTTPS-only exit probe
 
@@ -61,7 +106,7 @@ order: 30
 status: recalculate
 original_commit: 3c39b35c81b8e4664d9110b9e68939c66b263817
 stable_patch_id: 832b2eb8f0baacd9be76a430d62fa9ee45b917dd
-last_reviewed_against: e316ebf52838a89d57fc790981cce7520f819ac8
+last_reviewed_against: f632528563cf57ec7fdbefb7221d1a770ab88cc9
 upstream_issue_or_pr: none
 ```
 
@@ -69,6 +114,9 @@ upstream_issue_or_pr: none
 - Invariant：生产 candidate 不包含未接受、未到期例外覆盖的可利用高危/严重运行依赖漏洞。
 - Paths：`backend/go.mod`、`backend/go.sum`。
 - Tests：unit/integration、编译、govulncheck、容器 Inspector。
+- 2026-08-01 Inspector 对当时的候选 amd64 工件发现 `CVE-2026-41178`（MEDIUM，
+  `go.opentelemetry.io/otel` v1.41.0，修复版本 v1.44.0）；当时的 `.6` 候选已升级
+  core/metric/sdk/trace 到 v1.44.0，但仍要求后续工件重新构建、扫描并在私有证据中记录 digest。
 - Drop condition：目标 upstream 依赖树已包含等价或更高修复，且重新扫描通过。
 - Next sync：对目标 upstream 重新计算依赖修复，不永久重放这个 lockfile patch。
 
@@ -82,7 +130,8 @@ upstream_issue_or_pr: none
 | `contribute` | 通用修复正在回馈 upstream | contrib branch/PR，同时说明本 release 如何 carry |
 | `retire` | 生产约束已不存在 | 架构/配置证据与风险复核 |
 
-“无冲突”或“能编译”都不是完整结论。没有三项 patch 的明确处置和证据，candidate 不得 promotion。
+“无冲突”或“能编译”都不是完整结论。没有当前 release 全部 Patch ID 的明确处置和证据，
+candidate 不得 promotion。
 
 ## 新增或重写规则
 

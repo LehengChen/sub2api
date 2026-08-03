@@ -4,7 +4,43 @@
 
 ## 当前事实
 
-截至 2026-07-13，当前部署版本存在以下边界：
+截至 2026-08-03（Asia/Tokyo），已发布的
+`frenzy/app/v0.1.169-c68b4c8b.2` 源码中，`/livez` 只证明进程 HTTP listener 可响应；
+`/readyz` 会在同一个有界 probe context 内检查初始化、drain、进程角色、worker fencing
+lease、PostgreSQL、Redis、migration checksum，以及 worker 角色的 scheduler 首次 rebuild。
+probe 响应只输出 `ok`/`failed`，不会回传可能含连接信息的底层错误。该源码事实不自动证明
+部署状态；私有 release manifest 与 running artifact 已另行确认该 source 在受控的 externally
+managed 环境激活，环境身份与 artifact digest 不在公开契约复制。
+
+生产镜像自身的 Docker `HEALTHCHECK` 使用 `/livez`，只负责进程存活；Compose 和示例
+Caddy 的流量健康检查使用 `/readyz`。`/health` 继续作为旧部署兼容别名，但新的负载均衡
+或服务编排配置不得用它替代 readiness。
+
+SIGTERM 会先令 `/readyz` 失败并拒绝新请求，再在配置的 shutdown 总预算内调用
+`http.Server.Shutdown` 和等待活动 handler。普通 HTTP/SSE 由 request registry 与
+`net/http` 共同管理；当前所有应用内 WebSocket upgrade 路径（OpenAI Responses、Live
+sideband 和管理面 QPS）还会单独登记 hijacked socket。应用从总预算中预留最多 1 秒，
+用于到期后强制关闭 socket 并等待 handler 提交尾部 usage；客户端必须重连，不能把该行为
+描述成 WebSocket 无中断迁移。若该收尾窗口仍超时，应用会记录残留 request/connection
+数量；在候选演练证明之前不能宣称尾部写入零丢失。
+
+请求排空后，应用清理按 `usage-record worker pool -> billing-cache async writes -> deferred
+quota final flush` 严格串行，再并行停止其余独立后台服务，最后关闭 Redis 与 Ent client。
+幂等请求记录在请求事务路径同步落库，不存在额外的进程内 idempotency 写队列；
+`IdempotencyCleanupService` 只是历史记录清理任务。多数旧 service 的 `Stop()` 尚未接受
+context，因此完整应用清理仍没有统一硬时限；systemd/container 的最终停止上限和生产实际
+排空耗时必须通过候选演练测量，不能从 HTTP shutdown timeout 推算。
+
+当前 v0.1.169 release 已保留并扩展显式 `active`、`standby`、`worker`、
+`api`、`migrator` 角色、migration-only 启动、Redis worker lease/fencing token 和 scheduler
+首次 rebuild readiness。stop-first 人工冷备切换路径已在受控 externally managed 部署中
+演练；这只证明人工控制路径可执行，不证明混合版本滚动、active-active、自动故障切换或
+零中断。完整边界见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)，环境证据仍留在私有 ops。
+
+### 历史运行快照：v0.1.151（2026-07-13）
+
+以下边界描述升级前的 v0.1.151，已被上述 v0.1.169 源码与部署结论取代；保留它用于解释
+本契约为何把并发状态、OAuth session、readiness 和 drain 作为硬门禁。
 
 - `/health` 固定返回 200，只证明 HTTP 进程可以响应，不检查 PostgreSQL、Redis、migration 或账号调度。
 - 没有真正的 `/readyz`；未知路由可能落入前端 SPA，不能被当作 readiness。
@@ -15,9 +51,11 @@
 - `ConcurrencyService` 启动时把非本进程 request-prefix 的 Redis account/user slot 当作 stale 清理，并删除共享等待计数；第二个健康 Center 启动会破坏第一个 Center 的在途并发状态。修复前禁止双活或滚动重叠。
 - xAI 与 Antigravity OAuth `SessionStore` 仍是进程内 map；回调落到另一实例时不能读取原 session。
 
-因此，当前单 Center 可以做维护窗口发布，但不满足“无计划中断”的发布契约。
+因此，当时的 v0.1.151 单 Center 只能做维护窗口发布，不满足“无计划中断”的发布契约。
 
-上面的并发清理是多副本 P0 硬阻断，不是“观察后可接受”的风险。目标实现必须让 slot 归属具有可验证的实例 lease/过期语义，不能把“不是我的 prefix”直接等同于“已死进程”；同时要保留崩溃实例残留的有界回收能力。
+该历史并发清理是多副本 P0 硬阻断，不是“观察后可接受”的风险。v0.1.169 已引入实例
+lease/过期语义与共享 OAuth session，并保留崩溃实例残留的有界回收能力；但这仍不替代
+N/N-1 混合版本、所有关键写路径 fencing 和双进程 integration 证明。
 
 ## 目标端点
 
@@ -63,7 +101,10 @@ readiness 必须快速、有超时、无副作用，不能在每个 probe 中做
 - systemd、容器、ASG lifecycle hook 和 ALB deregistration timeout 要相互一致；
 - 新请求在 drain 开始后不能再进入旧实例；
 - SSE/WebSocket 客户端必须支持断线重连；长连接无法仅靠负载均衡器获得绝对无感迁移；
-- 计费写入、用量日志和幂等状态必须在退出前 flush 或通过数据库幂等恢复。
+- 计费写入与用量日志必须按 producer/consumer 顺序 flush；幂等状态必须同步持久化或通过
+  数据库幂等恢复；
+- 候选演练必须分别记录 ALB deregistration、HTTP/SSE 排空、WebSocket 强制断开和应用清理
+  的实际耗时，不能只记录 systemd 最终退出时间。
 
 ## 新旧版本并存契约
 
@@ -108,7 +149,8 @@ Release C: contract，确认回滚窗口结束后清理
 
 ## 多副本后台任务门禁
 
-进入双 Center 前，逐项列出所有启动 goroutine/cron/queue worker，并确认：
+进入 active-active、自动故障切换或有流量重叠的 rolling 前，逐项列出所有启动
+goroutine/cron/queue worker，并确认：
 
 - leader lock key 全局唯一；
 - lock TTL 大于任务最坏运行时间；
@@ -119,13 +161,26 @@ Release C: contract，确认回滚窗口结束后清理
 
 代码中已有的 leader-lock helper 是基础，不是完成证明。验收需要真正的双进程 integration test 与生产 canary 观察。
 
-进入双 Center 前还必须完成：
+进入 active-active、自动故障切换或有流量重叠的 rolling 前还必须完成：
 
 - 两个实例同时持有 account/user slots 时，任一实例启动或退出都不会删除另一个实例的活动 slot/waiter；
 - crash 后的 slot 能在明确 TTL/lease 后回收，且并发限额不会永久泄漏；
 - OAuth state/session 外部化，或由签名无状态数据实现，并验证跨实例 start/callback；
 - 备份、账号定时测试、渠道监控、token refresh、cleanup、aggregation 等所有启动任务逐项分类为“每实例幂等”或“带 fencing 的单例”；
 - 不依赖负载均衡 sticky session 掩盖状态不共享问题。
+
+当前源码已把下列启动路径接入 `WorkerFence`：token refresh、scheduler/cleanup、备份、
+渠道监控、账号/代理/订阅 expiry、ops/audit、batch image、auth-cache outbox、
+email queue、billing-cache 异步写队列、content-moderation worker、subscription
+maintenance/invalidation subscriber、usage-record pool，以及 upstream billing/Ollama
+周期探测。`standby` 会构造只读依赖但不启动这些单例任务；standby 的 usage-record 提交、
+异步 billing-cache 写入和邮件入队会被丢弃或显式返回 disabled。相关 provider 契约测试位于
+`backend/internal/service/standby_worker_providers_test.go` 和
+`provider_worker_fence_test.go`。
+
+这只证明“启动门控”和“失租后排空”路径，不证明所有关键写入都携带 fencing token。
+`WorkerFence` 丢失后进程会进入 drain，但仍需逐项完成双进程 integration、共享状态和
+幂等性验证；在这些证据完成前，自动 failover 与 active-active 继续关闭。
 
 ## 发布兼容清单
 

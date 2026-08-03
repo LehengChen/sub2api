@@ -15,13 +15,17 @@
 | 余额/订阅/Key 额度检查 | 跳过 | 执行 |
 | 使用日志 | 记录但不扣费 | 记录并按规则计费 |
 | 默认组 | 启动时自动补齐平台默认组 | 由管理员维护 |
-| 多应用副本 | 不推荐 | 业务能力适合多用户，但当前版本尚未通过多副本安全认证 |
+| 多应用副本 | 不推荐 | 支持受控 active + cold standby；active-active/滚动重叠尚未通过安全认证 |
 
 Simple 不是“精简 UI 的 Standard”。它会在 API Key 认证后提前放行、跳过余额和订阅检查，并在调度时忽略 `account_groups` 边界。即便 Key 显示属于某个默认组，也不能据此认定请求只会使用那个组内的账号。
 
 Standard 才是用户所描述的完整模式：管理员创建用户、维护公开/专属分组、给账号绑定一个或多个分组，并让每把 API Key 只使用其所属组的账号池。
 
-Standard 不等于已经可以横向扩容。当前版本的并发槽启动清理会影响其他进程的 Redis request-prefix，部分 OAuth 临时状态仍在进程内，且若干后台任务尚未具备跨实例 fencing/幂等证明。双 Center 前必须完成 [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) 的多副本门禁；不能仅因为运行模式是 Standard 就直接增加实例。
+Standard 不等于已经可以横向扩容。v0.1.169 已修复旧版跨进程并发槽清理、外部化 OAuth
+临时状态，并提供显式角色、worker lease 与 cold standby 门禁，因此可以运行一个接流量的
+`active` 和一个不接流量、不启动单例 worker 的 `standby`，按 stop-first 顺序人工切换。
+这不允许两个 Center 同时接业务流量；active-active、自动故障切换或有流量重叠的 rolling
+仍须完成 [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) 的门禁。
 
 非法或缺失的 `run_mode` 当前会回退为 `standard`。不要依赖这个回退；生产必须显式配置。
 
@@ -81,7 +85,7 @@ Standard 下，分组还有两种计费类型：
 - `openai-prod`：OpenAI 账号
 - 可选 `*-canary`：只挂少量账号，用于版本或模型验证
 
-不要按 Osaka-01/02/03 拆业务组。否则客户端会失去统一调度，而固定出口已经由账号到代理的绑定保证。
+不要按 `exit-01/02/03` 拆业务组。否则客户端会失去统一调度，而固定出口已经由账号到代理的绑定保证。
 
 ## 5. 部署方法不是应用运行模式
 
@@ -97,6 +101,8 @@ Standard 下，分组还有两种计费类型：
 以上任一种都可以配置 Simple 或 Standard。`server.mode=debug|release` 只是 Web 服务器/Gin 的调试或发布模式，也不是产品业务模式。
 
 同样，`pilot` 与 `production` 是基础设施成熟度：RDS 是否 Multi-AZ、Redis 是否有副本、应用是否多副本、是否有演练和告警。把 `RUN_MODE` 改为 Standard 不会自动获得高可用。
+
+部署工件由谁控制也是独立维度。`SUB2API_DEPLOYMENT_CONTROL_MODE=self_managed|externally_managed` 只决定管理面板能否执行应用内更新、回退和重启，不改变 Simple/Standard 业务语义。不可变容器和受控生产环境应使用 `externally_managed`，并由批准 release catalog 提供 app tag、完整源码 SHA、镜像 digest 和 ops revision；详见 [`EXTERNAL_RELEASE_CONTROL.md`](EXTERNAL_RELEASE_CONTROL.md)。
 
 ## 推荐目标：受控 Standard
 
@@ -146,10 +152,6 @@ Backend Mode：关闭
 - 使用日志、余额/订阅扣减和账号用量一致。
 - 公众注册仍不可用。
 - 账号固定代理和出口 EIP 未发生变化。
-
-## 已知文档漂移
-
-当前 README 提到生产 Simple 需要 `SIMPLE_MODE_CONFIRM=true`，但当前代码没有读取该变量。不要把它当成启动保护。真正的保护必须来自显式配置、部署校验和测试。
 
 ## 代码入口
 

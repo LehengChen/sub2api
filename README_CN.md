@@ -701,7 +701,7 @@ go generate ./cmd/server
 
 - 启用方式：设置环境变量 `RUN_MODE=simple`
 - 功能差异：隐藏 SaaS 相关功能，跳过计费流程
-- 安全注意事项：生产环境需同时设置 `SIMPLE_MODE_CONFIRM=true` 才允许启动
+- 生产注意事项：部署系统必须显式设置 `RUN_MODE`；应用没有实现额外的 Simple 模式确认变量。
 
 ---
 
