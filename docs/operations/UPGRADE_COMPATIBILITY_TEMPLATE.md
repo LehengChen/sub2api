@@ -51,11 +51,13 @@ reviewer:
 
 ## Patch 处置
 
+从 [`PATCH_QUEUE.md`](PATCH_QUEUE.md) 的当前发布表复制全部 active Patch ID；不得在模板中
+固化数量，也不得遗漏后以“无变化”代替处置。每项只能选择 `drop-upstreamed`、
+`reimplement`、`cherry-pick`、`contribute` 或 `retire`，并附可重复验证。
+
 | Patch ID | 旧 commit/patch-id | 结论 | 新 commit/upstream commit | 定向测试 | drop condition |
 |---|---|---|---|---|---|
-| FZ-001 | | | | | |
-| FZ-002 | | | | | |
-| FZ-003 | | | | | |
+| （逐项复制当前 active ID） | | | | | |
 
 ## 验证与发布策略
 

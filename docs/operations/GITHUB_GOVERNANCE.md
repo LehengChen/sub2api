@@ -21,8 +21,9 @@
   required checks 和 tag immutability 仍未由 GitHub 服务端强制执行。
 - Frenzy Candidate 已提供独立候选流水线；每次 release 仍必须引用与目标 SHA 对应的实际
   run/check 证据，不能由 workflow 文件存在反推某个历史 tag 已通过。
-- `.github/audit-exceptions.yml` 仍有两个 `xlsx` 例外，截止日期为 2026-10-06；必须在到期前
-  由实际依赖审计决定删除、升级或重新审批，不能仅凭迁移文档中的依赖替换描述提前关闭。
+- `.github/audit-exceptions.yml` 当前为空；`xlsx` 已由 `@e965/xlsx` 替代，2026-08-03
+  重新执行的 production dependency audit 为 high/critical 0。该结果只属于本次源码和
+  lockfile，后续每个候选仍须重新审计，不能把空例外清单当作永久安全证明。
 
 这些是 2026-08-03 的只读外部事实和风险登记，不是本轮文档提交自动修复的 GitHub 设置。
 

@@ -2,7 +2,7 @@
 
 本目录保存可进入公开应用 fork 的通用运行与维护知识。AWS 账号、生产资源和发布清单属于私有运维仓库，不在这里复制。
 
-## 文档地图
+## 当前契约
 
 | 文档 | 说明 |
 |---|---|
@@ -10,16 +10,25 @@
 | [`PROJECT_MAINTENANCE.md`](PROJECT_MAINTENANCE.md) | 双仓库职责、事实轴、变更分类和内部维护生命周期 |
 | [`DEPLOYMENT_MODES.md`](DEPLOYMENT_MODES.md) | Simple、Standard、Backend Mode、分组类型和部署拓扑的区别 |
 | [`UPSTREAM_MAINTENANCE.md`](UPSTREAM_MAINTENANCE.md) | fork/upstream 同步状态机、候选 promotion 和停止条件 |
-| [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md) | 当前 deployed/upstream 差距的带日期快照 |
 | [`PATCH_QUEUE.md`](PATCH_QUEUE.md) | Frenzy runtime patch 的稳定 ID、行为不变量和删除条件 |
 | [`UPGRADE_COMPATIBILITY_TEMPLATE.md`](UPGRADE_COMPATIBILITY_TEMPLATE.md) | 每次 upstream 升级的 migration/config/回滚审查模板 |
-| [`UPGRADE_V0.1.169.md`](UPGRADE_V0.1.169.md) | v0.1.169 的最终公开 release 身份及历史候选兼容性记录 |
 | [`ROLLING_RELEASE_CONTRACT.md`](ROLLING_RELEASE_CONTRACT.md) | readiness、drain、N/N-1、migration 和多副本应用契约 |
 | [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md) | active/standby/migrator 角色、worker fencing 和人工冷备切换契约 |
 | [`HEALTH_AND_DRAIN.md`](HEALTH_AND_DRAIN.md) | 应用 `/livez`、`/readyz`、SIGTERM 排空和长连接注册契约 |
 | [`EXTERNAL_RELEASE_CONTROL.md`](EXTERNAL_RELEASE_CONTROL.md) | 外部运维控制、只读 release catalog、版本 API capability 与 fail-closed 契约 |
 | [`GITHUB_GOVERNANCE.md`](GITHUB_GOVERNANCE.md) | fork CI、分支/tag 保护的期望与实际状态 |
 | [`../../DEV_GUIDE.md`](../../DEV_GUIDE.md) | 本地开发示例；Git/upstream 和生产规则不在该文件定义 |
+
+## 可变快照与版本记录
+
+| 文档 | 生命周期 |
+|---|---|
+| [`UPSTREAM_STATUS.md`](UPSTREAM_STATUS.md) | 带观察日期的 deployed/upstream 快照；新快照置顶，不能代替实时 fetch 或私有 manifest |
+| [`UPGRADE_V0.1.169.md`](UPGRADE_V0.1.169.md) | 已完成 v0.1.169 集成的版本专属兼容性与发布记录；下一版本必须新建记录，不能重放 |
+
+当前契约描述可重复规则；带版本或日期的文件只保存当时证据。SQL migration、Patch ID 和
+已发布 release 记录不得为了缩短目录而删除或改写。真正不再承载行为、兼容性或审计责任的
+文件才可移除，并须先证明没有代码、测试、文档或发布证据引用。
 
 若工作区同时存在私有 `infra/` 仓库，再阅读：
 
