@@ -22,6 +22,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 )
 
 const (
@@ -91,6 +92,9 @@ const (
 	contentModerationCleanupInterval = 24 * time.Hour
 	contentModerationCleanupTimeout  = 30 * time.Minute
 	contentModerationCleanupDelay    = 5 * time.Minute
+
+	contentModerationRuntimeCacheTTL       = time.Second
+	contentModerationRuntimeRefreshTimeout = 5 * time.Second
 )
 
 var contentModerationCategoryOrder = []string{
@@ -495,6 +499,7 @@ type ContentModerationService struct {
 	emailService             *EmailService
 	httpClient               *http.Client
 	asyncQueue               chan contentModerationTask
+	workersDisabled          bool
 	workerCount              int
 	apiKeyCursor             atomic.Uint64
 	asyncActive              atomic.Int64
@@ -511,8 +516,20 @@ type ContentModerationService struct {
 	lastCleanupUnix          atomic.Int64
 	lastCleanupDeletedHit    atomic.Int64
 	lastCleanupDeletedNonHit atomic.Int64
+	runtimeSnapshot          atomic.Pointer[contentModerationRuntimeSnapshot]
+	runtimeRefreshMu         sync.Mutex
+	runtimeCacheTTL          time.Duration
+	runtimeRefreshRetryAt    atomic.Int64
 	keyHealthMu              sync.Mutex
 	keyHealth                map[string]*contentModerationKeyHealth
+}
+
+type contentModerationRuntimeSnapshot struct {
+	riskControlEnabled bool
+	config             *ContentModerationConfig
+	keywordMatcher     *contentModerationKeywordMatcher
+	configDigest       [sha256.Size]byte
+	loadedAt           time.Time
 }
 
 type contentModerationTask struct {
@@ -553,6 +570,19 @@ func NewContentModerationService(
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
 ) *ContentModerationService {
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, true)
+}
+
+func newContentModerationService(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	startWorkers bool,
+) *ContentModerationService {
 	svc := &ContentModerationService{
 		settingRepo:          settingRepo,
 		repo:                 repo,
@@ -561,12 +591,13 @@ func NewContentModerationService(
 		userRepo:             userRepo,
 		authCacheInvalidator: authCacheInvalidator,
 		emailService:         emailService,
-		httpClient:           &http.Client{},
+		httpClient:           servertiming.InstrumentClient(nil),
 		workerCount:          maxContentModerationWorkerCount,
 		asyncQueue:           make(chan contentModerationTask, maxContentModerationQueueSize),
+		workersDisabled:      !startWorkers,
 		keyHealth:            make(map[string]*contentModerationKeyHealth),
 	}
-	if settingRepo != nil && repo != nil {
+	if startWorkers && settingRepo != nil && repo != nil {
 		for i := 0; i < svc.workerCount; i++ {
 			go svc.worker(i)
 		}
@@ -699,6 +730,7 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	if err := s.settingRepo.Set(ctx, SettingKeyContentModerationConfig, string(raw)); err != nil {
 		return nil, fmt.Errorf("save content moderation config: %w", err)
 	}
+	s.replaceRuntimeConfig(cfg, raw)
 	return s.configView(cfg), nil
 }
 
@@ -775,16 +807,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"protocol", input.Protocol)
 		return allow, nil
 	}
-	if !s.isRiskControlEnabled(ctx) {
-		slog.Info("content_moderation.skip_feature_disabled",
-			"user_id", input.UserID,
-			"api_key_id", input.APIKeyID,
-			"group_id", contentModerationLogGroupID(input.GroupID),
-			"endpoint", input.Endpoint,
-			"protocol", input.Protocol)
-		return allow, nil
-	}
-	cfg, err := s.loadConfig(ctx)
+	runtimeSnapshot, err := s.loadRuntimeSnapshot(ctx)
 	if err != nil {
 		slog.Warn("content_moderation.skip_config_load_failed",
 			"user_id", input.UserID,
@@ -795,6 +818,16 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"error", err)
 		return allow, nil
 	}
+	if !runtimeSnapshot.riskControlEnabled {
+		slog.Info("content_moderation.skip_feature_disabled",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"group_id", contentModerationLogGroupID(input.GroupID),
+			"endpoint", input.Endpoint,
+			"protocol", input.Protocol)
+		return allow, nil
+	}
+	cfg := runtimeSnapshot.config
 	inGroupScope := cfg.includesGroup(input.GroupID)
 	inModelScope := cfg.includesModel(input.Model)
 	slog.Info("content_moderation.config_loaded",
@@ -884,7 +917,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	hashText := content.Hash()
 	if cfg.Mode == ContentModerationModePreBlock {
 		if cfg.KeywordBlockingMode != ContentModerationKeywordModeAPIOnly && len(cfg.BlockedKeywords) > 0 {
-			if keyword, hit := matchBlockedKeyword(content.Text, cfg.BlockedKeywords); hit {
+			if keyword, hit := runtimeSnapshot.matchBlockedKeyword(content.Text); hit {
 				s.recordPreBlockSyncMetric(0, ContentModerationActionKeywordBlock)
 				slog.Info("content_moderation.keyword_block",
 					"user_id", input.UserID,
@@ -1109,7 +1142,7 @@ func (s *ContentModerationService) recordPreBlockSyncMetric(latencyMS int, actio
 }
 
 func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string) {
-	if s == nil || s.asyncQueue == nil {
+	if s == nil || s.workersDisabled || s.asyncQueue == nil {
 		return
 	}
 	queueSize := defaultContentModerationQueueSize
@@ -1137,7 +1170,7 @@ func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInpu
 }
 
 func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInput, cfg *ContentModerationConfig, log *ContentModerationLog, inputHash string, recordHash bool, applySideEffects bool) {
-	if s == nil || s.asyncQueue == nil || log == nil {
+	if s == nil || s.workersDisabled || s.asyncQueue == nil || log == nil {
 		return
 	}
 	queueSize := defaultContentModerationQueueSize
@@ -1177,12 +1210,13 @@ func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInp
 func (s *ContentModerationService) worker(id int) {
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), maxContentModerationTimeoutMS*time.Millisecond+10*time.Second)
-		cfg, err := s.loadConfig(ctx)
-		if err != nil || id >= cfg.WorkerCount {
+		runtimeSnapshot, err := s.loadRuntimeSnapshot(ctx)
+		if err != nil || runtimeSnapshot == nil || runtimeSnapshot.config == nil || id >= runtimeSnapshot.config.WorkerCount {
 			cancel()
 			time.Sleep(time.Second)
 			continue
 		}
+		cfg := runtimeSnapshot.config
 		task, ok := s.dequeueAsyncTask(ctx, time.Second)
 		if !ok {
 			cancel()
@@ -1278,7 +1312,7 @@ func (s *ContentModerationService) UnbanUser(ctx context.Context, userID int64) 
 	}
 	if user.Status != StatusActive {
 		user.Status = StatusActive
-		if err := s.userRepo.Update(ctx, user); err != nil {
+		if err := s.userRepo.Update(ctx, user, UserUpdateFields{Status: true}); err != nil {
 			return nil, fmt.Errorf("update content moderation unban user: %w", err)
 		}
 	}
@@ -1437,15 +1471,18 @@ func (s *ContentModerationService) runCleanupOnce() {
 }
 
 func (s *ContentModerationService) loadConfig(ctx context.Context) (*ContentModerationConfig, error) {
-	cfg := defaultContentModerationConfig()
 	raw, err := s.settingRepo.GetValue(ctx, SettingKeyContentModerationConfig)
 	if err != nil {
 		if errors.Is(err, ErrSettingNotFound) {
-			cfg.normalize()
-			return cfg, nil
+			return parseContentModerationConfig("")
 		}
 		return nil, fmt.Errorf("get content moderation config: %w", err)
 	}
+	return parseContentModerationConfig(raw)
+}
+
+func parseContentModerationConfig(raw string) (*ContentModerationConfig, error) {
+	cfg := defaultContentModerationConfig()
 	if strings.TrimSpace(raw) == "" {
 		cfg.normalize()
 		return cfg, nil
@@ -1455,6 +1492,137 @@ func (s *ContentModerationService) loadConfig(ctx context.Context) (*ContentMode
 	}
 	cfg.normalize()
 	return cfg, nil
+}
+
+func (s *ContentModerationService) loadRuntimeSnapshot(ctx context.Context) (*contentModerationRuntimeSnapshot, error) {
+	if s == nil || s.settingRepo == nil {
+		return nil, errors.New("content moderation setting repository unavailable")
+	}
+	now := time.Now()
+	if snapshot := s.runtimeSnapshot.Load(); snapshot != nil {
+		if now.Sub(snapshot.loadedAt) < s.runtimeSnapshotTTL() {
+			return snapshot, nil
+		}
+		s.triggerRuntimeSnapshotRefresh()
+		return snapshot, nil
+	}
+
+	s.runtimeRefreshMu.Lock()
+	defer s.runtimeRefreshMu.Unlock()
+	if snapshot := s.runtimeSnapshot.Load(); snapshot != nil {
+		return snapshot, nil
+	}
+	return s.refreshRuntimeSnapshot(ctx)
+}
+
+func (s *ContentModerationService) runtimeSnapshotTTL() time.Duration {
+	if s != nil && s.runtimeCacheTTL > 0 {
+		return s.runtimeCacheTTL
+	}
+	return contentModerationRuntimeCacheTTL
+}
+
+func (s *ContentModerationService) triggerRuntimeSnapshotRefresh() {
+	if s == nil || s.runtimeRefreshDeferred() || !s.runtimeRefreshMu.TryLock() {
+		return
+	}
+	if s.runtimeRefreshDeferred() {
+		s.runtimeRefreshMu.Unlock()
+		return
+	}
+	go func() {
+		defer s.runtimeRefreshMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), contentModerationRuntimeRefreshTimeout)
+		defer cancel()
+		if _, err := s.refreshRuntimeSnapshot(ctx); err != nil {
+			s.runtimeRefreshRetryAt.Store(time.Now().Add(s.runtimeSnapshotTTL()).UnixNano())
+			slog.Warn("content_moderation.runtime_snapshot_refresh_failed", "error", err)
+		}
+	}()
+}
+
+func (s *ContentModerationService) runtimeRefreshDeferred() bool {
+	if s == nil {
+		return false
+	}
+	return time.Now().UnixNano() < s.runtimeRefreshRetryAt.Load()
+}
+
+func (s *ContentModerationService) refreshRuntimeSnapshot(ctx context.Context) (*contentModerationRuntimeSnapshot, error) {
+	values, err := s.settingRepo.GetMultiple(ctx, []string{
+		SettingKeyRiskControlEnabled,
+		SettingKeyContentModerationConfig,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get content moderation runtime settings: %w", err)
+	}
+	rawConfig := values[SettingKeyContentModerationConfig]
+	configDigest := sha256.Sum256([]byte(rawConfig))
+	if current := s.runtimeSnapshot.Load(); current != nil && current.configDigest == configDigest {
+		snapshot := &contentModerationRuntimeSnapshot{
+			riskControlEnabled: values[SettingKeyRiskControlEnabled] == "true",
+			config:             current.config,
+			keywordMatcher:     current.keywordMatcher,
+			configDigest:       configDigest,
+			loadedAt:           time.Now(),
+		}
+		s.runtimeSnapshot.Store(snapshot)
+		s.runtimeRefreshRetryAt.Store(0)
+		return snapshot, nil
+	}
+	cfg, err := parseContentModerationConfig(rawConfig)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := &contentModerationRuntimeSnapshot{
+		riskControlEnabled: values[SettingKeyRiskControlEnabled] == "true",
+		config:             cfg,
+		keywordMatcher:     newContentModerationKeywordMatcher(cfg.BlockedKeywords),
+		configDigest:       configDigest,
+		loadedAt:           time.Now(),
+	}
+	s.runtimeSnapshot.Store(snapshot)
+	s.runtimeRefreshRetryAt.Store(0)
+	return snapshot, nil
+}
+
+func (s *ContentModerationService) replaceRuntimeConfig(cfg *ContentModerationConfig, raw []byte) {
+	if s == nil || cfg == nil {
+		return
+	}
+	s.runtimeRefreshMu.Lock()
+	hasSnapshot := s.runtimeSnapshot.Load() != nil
+	s.runtimeRefreshMu.Unlock()
+	if !hasSnapshot {
+		return
+	}
+	config := cloneContentModerationConfig(cfg)
+	keywordMatcher := newContentModerationKeywordMatcher(cfg.BlockedKeywords)
+	configDigest := sha256.Sum256(raw)
+
+	s.runtimeRefreshMu.Lock()
+	defer s.runtimeRefreshMu.Unlock()
+	current := s.runtimeSnapshot.Load()
+	if current == nil {
+		return
+	}
+	s.runtimeSnapshot.Store(&contentModerationRuntimeSnapshot{
+		riskControlEnabled: current.riskControlEnabled,
+		config:             config,
+		keywordMatcher:     keywordMatcher,
+		configDigest:       configDigest,
+		loadedAt:           time.Now(),
+	})
+}
+
+func (s *contentModerationRuntimeSnapshot) matchBlockedKeyword(text string) (string, bool) {
+	if s == nil || s.config == nil {
+		return "", false
+	}
+	if s.keywordMatcher != nil {
+		return s.keywordMatcher.Match(text)
+	}
+	return matchBlockedKeyword(text, s.config.BlockedKeywords)
 }
 
 func (s *ContentModerationService) isRiskControlEnabled(ctx context.Context) bool {
@@ -1679,7 +1847,7 @@ func (s *ContentModerationService) applyFlaggedAccountSideEffects(ctx context.Co
 		}
 		if user.Status != StatusDisabled {
 			user.Status = StatusDisabled
-			if err := s.userRepo.Update(ctx, user); err != nil {
+			if err := s.userRepo.Update(ctx, user, UserUpdateFields{Status: true}); err != nil {
 				slog.Warn("content_moderation.ban_update_user_failed", "user_id", *log.UserID, "error", err)
 				return false
 			}

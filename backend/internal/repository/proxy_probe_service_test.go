@@ -23,6 +23,10 @@ func (s *ProxyProbeServiceSuite) SetupTest() {
 	s.ctx = context.Background()
 	s.prober = &proxyProbeService{
 		allowPrivateHosts: true,
+		probeTargets: []proxyProbeTarget{
+			{"http://ipwho.is/", "ipwhois"},
+			{"http://httpbin.org/ip", "httpbin"},
+		},
 	}
 }
 
@@ -49,12 +53,11 @@ func (s *ProxyProbeServiceSuite) TestProbeProxy_UnsupportedProxyScheme() {
 	require.ErrorContains(s.T(), err, "failed to create proxy client")
 }
 
-func (s *ProxyProbeServiceSuite) TestProbeProxy_Success_IPAPI() {
+func (s *ProxyProbeServiceSuite) TestProbeProxy_Success_IPWhoIs() {
 	s.setupProxyServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 检查是否是 ip-api 请求
-		if strings.Contains(r.RequestURI, "ip-api.com") {
+		if strings.Contains(r.RequestURI, "ipwho.is") {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"status":"success","query":"1.2.3.4","city":"c","regionName":"r","country":"cc","countryCode":"CC"}`)
+			_, _ = io.WriteString(w, `{"success":true,"ip":"1.2.3.4","city":"c","region":"r","country":"cc","country_code":"CC"}`)
 			return
 		}
 		// 其他请求返回错误
@@ -73,8 +76,8 @@ func (s *ProxyProbeServiceSuite) TestProbeProxy_Success_IPAPI() {
 
 func (s *ProxyProbeServiceSuite) TestProbeProxy_Success_HTTPBinFallback() {
 	s.setupProxyServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ip-api 失败
-		if strings.Contains(r.RequestURI, "ip-api.com") {
+		// ipwho.is 失败
+		if strings.Contains(r.RequestURI, "ipwho.is") {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -105,13 +108,13 @@ func (s *ProxyProbeServiceSuite) TestProbeProxy_AllFailed() {
 
 func (s *ProxyProbeServiceSuite) TestProbeProxy_InvalidJSON() {
 	s.setupProxyServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.RequestURI, "ip-api.com") {
+		if strings.Contains(r.RequestURI, "ipwho.is") {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, "not-json")
 			return
 		}
-		// httpbin 也返回无效响应
-		if strings.Contains(r.RequestURI, "httpbin.org") {
+		// ipify 也返回无效响应
+		if strings.Contains(r.RequestURI, "api64.ipify.org") {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, "not-json")
 			return
@@ -132,9 +135,9 @@ func (s *ProxyProbeServiceSuite) TestProbeProxy_ProxyServerClosed() {
 	require.Error(s.T(), err, "expected error when proxy server is closed")
 }
 
-func (s *ProxyProbeServiceSuite) TestParseIPAPI_Success() {
-	body := []byte(`{"status":"success","query":"1.2.3.4","city":"Beijing","regionName":"Beijing","country":"China","countryCode":"CN"}`)
-	info, latencyMs, err := s.prober.parseIPAPI(body, 100)
+func (s *ProxyProbeServiceSuite) TestParseIPWhoIs_Success() {
+	body := []byte(`{"success":true,"ip":"1.2.3.4","city":"Beijing","region":"Beijing","country":"China","country_code":"CN"}`)
+	info, latencyMs, err := s.prober.parseIPWhoIs(body, 100)
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), int64(100), latencyMs)
 	require.Equal(s.T(), "1.2.3.4", info.IP)
@@ -144,26 +147,32 @@ func (s *ProxyProbeServiceSuite) TestParseIPAPI_Success() {
 	require.Equal(s.T(), "CN", info.CountryCode)
 }
 
-func (s *ProxyProbeServiceSuite) TestParseIPAPI_Failure() {
-	body := []byte(`{"status":"fail","message":"rate limited"}`)
-	_, _, err := s.prober.parseIPAPI(body, 100)
+func (s *ProxyProbeServiceSuite) TestParseIPWhoIs_Failure() {
+	body := []byte(`{"success":false,"message":"rate limited"}`)
+	_, _, err := s.prober.parseIPWhoIs(body, 100)
 	require.Error(s.T(), err)
 	require.ErrorContains(s.T(), err, "rate limited")
 }
 
-func (s *ProxyProbeServiceSuite) TestParseHTTPBin_Success() {
-	body := []byte(`{"origin": "9.8.7.6"}`)
-	info, latencyMs, err := s.prober.parseHTTPBin(body, 50)
+func (s *ProxyProbeServiceSuite) TestParseIPify_Success() {
+	body := []byte(`{"ip": "2001:db8::1"}`)
+	info, latencyMs, err := s.prober.parseIPify(body, 50)
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), int64(50), latencyMs)
-	require.Equal(s.T(), "9.8.7.6", info.IP)
+	require.Equal(s.T(), "2001:db8::1", info.IP)
 }
 
-func (s *ProxyProbeServiceSuite) TestParseHTTPBin_NoIP() {
-	body := []byte(`{"origin": ""}`)
-	_, _, err := s.prober.parseHTTPBin(body, 50)
+func (s *ProxyProbeServiceSuite) TestParseIPify_NoIP() {
+	body := []byte(`{"ip": ""}`)
+	_, _, err := s.prober.parseIPify(body, 50)
 	require.Error(s.T(), err)
 	require.ErrorContains(s.T(), err, "no IP found")
+}
+
+func (s *ProxyProbeServiceSuite) TestDefaultProbeTargetsUseHTTPS() {
+	for _, probe := range defaultProxyProbeTargets {
+		require.True(s.T(), strings.HasPrefix(probe.url, "https://"), probe.url)
+	}
 }
 
 func TestProxyProbeServiceSuite(t *testing.T) {

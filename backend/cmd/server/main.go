@@ -19,7 +19,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
+	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
@@ -58,6 +61,7 @@ func main() {
 
 	// Parse command line flags
 	setupMode := flag.Bool("setup", false, "Run setup wizard in CLI mode")
+	migrateMode := flag.Bool("migrate", false, "Apply database migrations and exit")
 	showVersion := flag.Bool("version", false, "Show version information")
 	flag.Parse()
 
@@ -74,8 +78,20 @@ func main() {
 		return
 	}
 
+	runtimeControl, err := runtimecontrol.LoadFromEnv()
+	if err != nil {
+		log.Fatalf("Invalid process runtime control: %v", err)
+	}
+	if *migrateMode || runtimeControl.Role == runtimecontrol.RoleMigrator {
+		runMigrator()
+		return
+	}
+
 	// Check if setup is needed
 	if setup.NeedsSetup() {
+		if runtimeControl.Role != runtimecontrol.RoleAll {
+			log.Fatalf("Setup must be completed before starting explicit process role %q", runtimeControl.Role)
+		}
 		// Check if auto-setup is enabled (for Docker deployment)
 		if setup.AutoSetupEnabled() {
 			log.Println("Auto setup mode enabled...")
@@ -91,7 +107,20 @@ func main() {
 	}
 
 	// Normal server mode
-	runMainServer()
+	runMainServer(runtimeControl)
+}
+
+func runMigrator() {
+	cfg, err := config.LoadForBootstrap()
+	if err != nil {
+		log.Fatalf("Failed to load config for migrator: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	if err := repository.RunMigrations(ctx, cfg); err != nil {
+		log.Fatalf("Database migration failed: %v", err)
+	}
+	log.Println("Database migrations completed")
 }
 
 func runSetupServer() {
@@ -131,7 +160,7 @@ func runSetupServer() {
 	}
 }
 
-func runMainServer() {
+func runMainServer(runtimeControl runtimecontrol.Control) {
 	cfg, err := config.LoadForBootstrap()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -143,16 +172,46 @@ func runMainServer() {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
 
+	deploymentControl, err := service.LoadDeploymentControlFromEnv()
+	if err != nil {
+		log.Fatalf("Invalid deployment control: %v", err)
+	}
+	if deploymentControl.IsExternallyManaged() && runtimeControl.Role == runtimecontrol.RoleAll {
+		log.Fatalf("Externally managed deployments must set %s to an explicit non-legacy role", runtimecontrol.ProcessRoleEnv)
+	}
+
 	buildInfo := handler.BuildInfo{
-		Version:   Version,
-		BuildType: BuildType,
+		Version:           Version,
+		BuildType:         BuildType,
+		DeploymentControl: deploymentControl,
+		RuntimeControl:    runtimeControl,
 	}
 
 	app, err := initializeApplication(buildInfo)
 	if err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
+	defer func() {
+		if err := app.WorkerFence.Stop(); err != nil {
+			log.Printf("Worker fence release failed: %v", err)
+		}
+	}()
 	defer app.Cleanup()
+	if runtimeControl.TrafficEligible() && app.PromptAudit != nil {
+		if err := app.PromptAudit.Start(context.Background()); err != nil {
+			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
+			// applies only when a persisted blocking policy was observed; without
+			// blocking intent, Prompt Audit stays ModeOff so the gateway remains
+			// usable and administrators can still disable the feature (#4560).
+			log.Printf("Prompt Audit started in degraded state: %v", err)
+		}
+	}
+	app.Health.MarkInitialized()
+	if !runtimeControl.ServesHTTP() {
+		log.Printf("Process role %s started without an HTTP listener", runtimeControl.Role)
+		waitForTermination(app)
+		return
+	}
 
 	// 启动服务器
 	go func() {
@@ -163,19 +222,61 @@ func runMainServer() {
 
 	log.Printf("Server started on %s", app.Server.Addr)
 
-	// 等待中断信号
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down server...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := app.Server.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
-	}
+	waitForTermination(app)
+	drainAndShutdown(app)
 
 	log.Println("Server exited")
+}
+
+func waitForTermination(app *Application) {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
+	if app.WorkerFence != nil && app.WorkerFence.Required() {
+		select {
+		case <-quit:
+		case <-app.WorkerFence.Lost():
+			log.Println("Singleton worker fence lost; draining process")
+		}
+		return
+	}
+	<-quit
+}
+
+func drainAndShutdown(app *Application) {
+	// Become unready before closing listeners so the load balancer stops
+	// assigning new work while existing requests are allowed to drain.
+	app.Health.BeginDrain()
+	log.Println("Server is draining...")
+
+	shutdownTimeout := app.Health.ShutdownTimeout()
+	overallCtx, cancelOverall := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelOverall()
+	overallDeadline, _ := overallCtx.Deadline()
+	forceCloseGrace := time.Second
+	if shutdownTimeout <= 2*forceCloseGrace {
+		forceCloseGrace = shutdownTimeout / 2
+	}
+	gracefulCtx, cancelGraceful := context.WithDeadline(context.Background(), overallDeadline.Add(-forceCloseGrace))
+	defer cancelGraceful()
+
+	shutdownErr := app.Server.Shutdown(gracefulCtx)
+	if shutdownErr != nil {
+		log.Printf("Graceful shutdown deadline reached: %v", shutdownErr)
+	}
+	drainErr := app.Health.WaitForDrain(gracefulCtx)
+	if drainErr != nil {
+		log.Printf("Long-lived connection drain deadline reached: %v (requests=%d connections=%d)", drainErr, app.Health.ActiveRequests(), app.Health.ActiveConnections())
+	}
+	if shutdownErr != nil || drainErr != nil {
+		if closeErr := app.Health.CloseLongLivedConnections(); closeErr != nil {
+			log.Printf("Forced long-lived connection close failed: %v", closeErr)
+		}
+		if closeErr := app.Server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			log.Printf("Forced server close failed: %v", closeErr)
+		}
+		if err := app.Health.WaitForDrain(overallCtx); err != nil {
+			log.Printf("Forced drain completion deadline reached: %v (requests=%d connections=%d)", err, app.Health.ActiveRequests(), app.Health.ActiveConnections())
+		}
+	}
 }

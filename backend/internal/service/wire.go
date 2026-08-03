@@ -9,15 +9,18 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 // BuildInfo contains build information
 type BuildInfo struct {
-	Version   string
-	BuildType string
+	Version           string
+	BuildType         string
+	DeploymentControl DeploymentControl
 }
 
 // ProvidePricingService creates and initializes PricingService
@@ -32,12 +35,13 @@ func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient)
 
 // ProvideUpdateService creates UpdateService with BuildInfo
 func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, buildInfo BuildInfo) *UpdateService {
-	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType)
+	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType, buildInfo.DeploymentControl)
 }
 
-// ProvideEmailQueueService creates EmailQueueService with default worker count
-func ProvideEmailQueueService(emailService *EmailService) *EmailQueueService {
-	return NewEmailQueueService(emailService, 3)
+// ProvideEmailQueueService creates EmailQueueService with default worker count.
+// Standby instances retain the dependency but do not run email workers.
+func ProvideEmailQueueService(emailService *EmailService, fence *WorkerFence) *EmailQueueService {
+	return newEmailQueueService(emailService, 3, shouldStartBackgroundWorkers(fence))
 }
 
 // ProvideOAuthRefreshAPI creates OAuthRefreshAPI with the default lock TTL.
@@ -49,21 +53,67 @@ func ProvideBatchImageModelPricingResolver(resolver *ModelPricingResolver) *Batc
 	return &BatchImageModelPricingResolver{Resolver: resolver}
 }
 
-func ProvideBatchImageCleanupService(repo BatchImageRepository, accountRepo AccountRepository, cfg *config.Config) *BatchImageCleanupService {
+func ProvideBatchImageCleanupService(repo BatchImageRepository, accountRepo AccountRepository, cfg *config.Config, fence *WorkerFence) *BatchImageCleanupService {
 	svc := NewBatchImageCleanupService(repo, accountRepo, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
-// ProvideOpenAIOAuthService creates OpenAIOAuthService with privacy/account enrichment support.
+// ProvideOAuthSessionStore keeps authorization state reachable from every API
+// instance. Redis errors fail OAuth closed; production must never silently fall
+// back to a process-local store in a multi-instance deployment.
+func ProvideOAuthSessionStore(redisClient *redis.Client) (OAuthSessionStore, error) {
+	return NewRedisOAuthSessionStore(redisClient, DefaultOAuthSessionKeyPrefix)
+}
+
+func ProvideOAuthService(
+	proxyRepo ProxyRepository,
+	oauthClient ClaudeOAuthClient,
+	sessionStore OAuthSessionStore,
+) (*OAuthService, error) {
+	return NewOAuthServiceWithSessionStore(proxyRepo, oauthClient, sessionStore)
+}
+
+// ProvideOpenAIOAuthService creates OpenAIOAuthService with shared session
+// state and privacy/account enrichment support.
 func ProvideOpenAIOAuthService(
 	proxyRepo ProxyRepository,
 	oauthClient OpenAIOAuthClient,
 	privacyClientFactory PrivacyClientFactory,
-) *OpenAIOAuthService {
-	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
+	sessionStore OAuthSessionStore,
+) (*OpenAIOAuthService, error) {
+	svc, err := NewOpenAIOAuthServiceWithSessionStore(proxyRepo, oauthClient, sessionStore)
+	if err != nil {
+		return nil, err
+	}
 	svc.SetPrivacyClientFactory(privacyClientFactory)
-	return svc
+	return svc, nil
+}
+
+func ProvideGrokOAuthService(
+	proxyRepo ProxyRepository,
+	oauthClient GrokOAuthClient,
+	sessionStore OAuthSessionStore,
+) (*GrokOAuthService, error) {
+	return NewGrokOAuthServiceWithSessionStore(proxyRepo, oauthClient, sessionStore)
+}
+
+func ProvideGeminiOAuthService(
+	proxyRepo ProxyRepository,
+	oauthClient GeminiOAuthClient,
+	codeAssist GeminiCliCodeAssistClient,
+	driveClient geminicli.DriveClient,
+	cfg *config.Config,
+	sessionStore OAuthSessionStore,
+) (*GeminiOAuthService, error) {
+	return NewGeminiOAuthServiceWithSessionStore(proxyRepo, oauthClient, codeAssist, driveClient, cfg, sessionStore)
+}
+
+func ProvideAntigravityOAuthService(
+	proxyRepo ProxyRepository,
+	sessionStore OAuthSessionStore,
+) (*AntigravityOAuthService, error) {
+	return NewAntigravityOAuthServiceWithSessionStore(proxyRepo, sessionStore)
 }
 
 // ProvideTokenRefreshService creates and starts TokenRefreshService
@@ -82,6 +132,7 @@ func ProvideTokenRefreshService(
 	proxyRepo ProxyRepository,
 	refreshAPI *OAuthRefreshAPI,
 	runtimeBlocker AccountRuntimeBlocker,
+	fence *WorkerFence,
 ) *TokenRefreshService {
 	svc := NewTokenRefreshService(accountRepo, oauthService, openaiOAuthService, geminiOAuthService, antigravityOAuthService, cacheInvalidator, schedulerCache, cfg, tempUnschedCache, grokOAuthService)
 	// 注入 OpenAI privacy opt-out 依赖
@@ -91,7 +142,7 @@ func ProvideTokenRefreshService(
 	// 调用侧显式注入后台刷新策略，避免策略漂移
 	svc.SetRefreshPolicy(DefaultBackgroundRefreshPolicy())
 	svc.SetAccountRuntimeBlocker(runtimeBlocker)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -131,8 +182,67 @@ func ProvideOpenAIQuotaService(
 	proxyRepo ProxyRepository,
 	tokenProvider *OpenAITokenProvider,
 	privacyClientFactory PrivacyClientFactory,
+	openAIGatewayService *OpenAIGatewayService,
 ) *OpenAIQuotaService {
-	return NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
+	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
+	service.agentIdentityWS = openAIGatewayService
+	return service
+}
+
+func ProvideAccountUsageService(
+	accountRepo AccountRepository,
+	usageLogRepo UsageLogRepository,
+	usageFetcher ClaudeUsageFetcher,
+	geminiQuotaService *GeminiQuotaService,
+	antigravityQuotaFetcher *AntigravityQuotaFetcher,
+	grokQuotaFetcher *GrokQuotaFetcher,
+	grokQuotaService *GrokQuotaService,
+	openAIQuotaService *OpenAIQuotaService,
+	cache *UsageCache,
+	identityCache IdentityCache,
+	tlsFPProfileService *TLSFingerprintProfileService,
+	openAIGatewayService *OpenAIGatewayService,
+) *AccountUsageService {
+	service := NewAccountUsageService(
+		accountRepo,
+		usageLogRepo,
+		usageFetcher,
+		geminiQuotaService,
+		antigravityQuotaFetcher,
+		grokQuotaFetcher,
+		grokQuotaService,
+		openAIQuotaService,
+		cache,
+		identityCache,
+		tlsFPProfileService,
+	)
+	service.agentIdentityWS = openAIGatewayService
+	return service
+}
+
+func ProvideAccountTestService(
+	accountRepo AccountRepository,
+	geminiTokenProvider *GeminiTokenProvider,
+	claudeTokenProvider *ClaudeTokenProvider,
+	grokTokenProvider *GrokTokenProvider,
+	antigravityGatewayService *AntigravityGatewayService,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	tlsFPProfileService *TLSFingerprintProfileService,
+	openAIGatewayService *OpenAIGatewayService,
+) *AccountTestService {
+	service := NewAccountTestService(
+		accountRepo,
+		geminiTokenProvider,
+		claudeTokenProvider,
+		grokTokenProvider,
+		antigravityGatewayService,
+		httpUpstream,
+		cfg,
+		tlsFPProfileService,
+	)
+	service.agentIdentityWS = openAIGatewayService
+	return service
 }
 
 func ProvideGrokQuotaService(
@@ -140,8 +250,10 @@ func ProvideGrokQuotaService(
 	proxyRepo ProxyRepository,
 	tokenProvider *GrokTokenProvider,
 	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	usageLogRepo UsageLogRepository,
 ) *GrokQuotaService {
-	return NewGrokQuotaService(accountRepo, proxyRepo, tokenProvider, httpUpstream)
+	return NewGrokQuotaService(accountRepo, proxyRepo, tokenProvider, httpUpstream, cfg, usageLogRepo)
 }
 
 // ProvideGeminiTokenProvider creates GeminiTokenProvider with OAuthRefreshAPI injection
@@ -185,85 +297,86 @@ func ProvideGrokTokenProvider(
 	p := NewGrokTokenProvider(accountRepo, tokenCache)
 	executor := NewGrokTokenRefresher(grokOAuthService)
 	p.SetRefreshAPI(refreshAPI, executor)
-	p.SetRefreshPolicy(AntigravityProviderRefreshPolicy())
+	p.SetRefreshPolicy(GrokProviderRefreshPolicy())
 	p.SetTempUnschedCache(tempUnschedCache)
 	return p
 }
 
 // ProvideDashboardAggregationService 创建并启动仪表盘聚合服务
-func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *DashboardAggregationService {
+func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config, fence *WorkerFence) *DashboardAggregationService {
 	svc := NewDashboardAggregationService(repo, timingWheel, cfg)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideUsageCleanupService 创建并启动使用记录清理任务服务
-func ProvideUsageCleanupService(repo UsageCleanupRepository, timingWheel *TimingWheelService, dashboardAgg *DashboardAggregationService, cfg *config.Config) *UsageCleanupService {
+func ProvideUsageCleanupService(repo UsageCleanupRepository, timingWheel *TimingWheelService, dashboardAgg *DashboardAggregationService, cfg *config.Config, fence *WorkerFence) *UsageCleanupService {
 	svc := NewUsageCleanupService(repo, timingWheel, dashboardAgg, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideAccountExpiryService creates and starts AccountExpiryService.
-func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpiryService {
+func ProvideAccountExpiryService(accountRepo AccountRepository, fence *WorkerFence) *AccountExpiryService {
 	svc := NewAccountExpiryService(accountRepo, time.Minute)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideProxyExpiryService creates and starts ProxyExpiryService.
-func ProvideProxyExpiryService(proxyRepo ProxyRepository) *ProxyExpiryService {
+func ProvideProxyExpiryService(proxyRepo ProxyRepository, fence *WorkerFence) *ProxyExpiryService {
 	svc := NewProxyExpiryService(proxyRepo, time.Minute)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideSubscriptionExpiryService creates and starts SubscriptionExpiryService.
-func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, settingRepo SettingRepository, notificationEmailService *NotificationEmailService, lockCache LeaderLockCache, db *sql.DB) *SubscriptionExpiryService {
+func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, settingRepo SettingRepository, notificationEmailService *NotificationEmailService, lockCache LeaderLockCache, db *sql.DB, fence *WorkerFence) *SubscriptionExpiryService {
 	svc := NewSubscriptionExpiryService(userSubRepo, time.Minute)
 	svc.SetSettingRepository(settingRepo)
 	svc.SetNotificationEmailService(notificationEmailService)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideTimingWheelService creates and starts TimingWheelService
-func ProvideTimingWheelService() (*TimingWheelService, error) {
+func ProvideTimingWheelService(fence *WorkerFence) (*TimingWheelService, error) {
 	svc, err := NewTimingWheelService()
 	if err != nil {
 		return nil, err
 	}
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc, nil
 }
 
 // ProvideDeferredService creates and starts DeferredService
-func ProvideDeferredService(accountRepo AccountRepository, timingWheel *TimingWheelService) *DeferredService {
+func ProvideDeferredService(accountRepo AccountRepository, timingWheel *TimingWheelService, fence *WorkerFence) *DeferredService {
 	svc := NewDeferredService(accountRepo, timingWheel, 10*time.Second)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideConcurrencyService creates ConcurrencyService and starts slot cleanup worker.
-func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountRepository, cfg *config.Config) *ConcurrencyService {
+func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountRepository, cfg *config.Config, fence *WorkerFence) *ConcurrencyService {
 	svc := NewConcurrencyService(cache)
-	if err := svc.CleanupStaleProcessSlots(context.Background()); err != nil {
-		logger.LegacyPrintf("service.concurrency", "Warning: startup cleanup stale process slots failed: %v", err)
-	}
 	if cfg != nil {
 		svc.SetAccountLoadBatchCacheTTL(time.Duration(cfg.Gateway.Scheduling.LoadBatchCacheTTLMS) * time.Millisecond)
-		svc.StartSlotCleanupWorker(accountRepo, cfg.Gateway.Scheduling.SlotCleanupInterval)
+		startSingletonWorker(fence, func() {
+			svc.StartSlotCleanupWorker(accountRepo, cfg.Gateway.Scheduling.SlotCleanupInterval)
+		})
 	}
 	return svc
 }
 
 // ProvideUserMessageQueueService 创建用户消息串行队列服务并启动清理 worker
-func ProvideUserMessageQueueService(cache UserMsgQueueCache, rpmCache RPMCache, cfg *config.Config) *UserMessageQueueService {
+func ProvideUserMessageQueueService(cache UserMsgQueueCache, rpmCache RPMCache, cfg *config.Config, fence *WorkerFence) *UserMessageQueueService {
 	svc := NewUserMessageQueueService(cache, rpmCache, &cfg.Gateway.UserMessageQueue)
 	if cfg.Gateway.UserMessageQueue.CleanupIntervalSeconds > 0 {
-		svc.StartCleanupWorker(time.Duration(cfg.Gateway.UserMessageQueue.CleanupIntervalSeconds) * time.Second)
+		startSingletonWorker(fence, func() {
+			svc.StartCleanupWorker(time.Duration(cfg.Gateway.UserMessageQueue.CleanupIntervalSeconds) * time.Second)
+		})
 	}
 	return svc
 }
@@ -275,9 +388,10 @@ func ProvideSchedulerSnapshotService(
 	accountRepo AccountRepository,
 	groupRepo GroupRepository,
 	cfg *config.Config,
+	fence *WorkerFence,
 ) *SchedulerSnapshotService {
 	svc := NewSchedulerSnapshotService(cache, outboxRepo, accountRepo, groupRepo, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -310,9 +424,10 @@ func ProvideOpsMetricsCollector(
 	db *sql.DB,
 	redisClient *redis.Client,
 	cfg *config.Config,
+	fence *WorkerFence,
 ) *OpsMetricsCollector {
 	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, db, redisClient, cfg)
-	collector.Start()
+	startSingletonWorker(fence, collector.Start)
 	return collector
 }
 
@@ -323,9 +438,10 @@ func ProvideOpsAggregationService(
 	db *sql.DB,
 	redisClient *redis.Client,
 	cfg *config.Config,
+	fence *WorkerFence,
 ) *OpsAggregationService {
 	svc := NewOpsAggregationService(opsRepo, settingRepo, db, redisClient, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -337,9 +453,10 @@ func ProvideOpsAlertEvaluatorService(
 	redisClient *redis.Client,
 	cfg *config.Config,
 	proxyRepo ProxyRepository,
+	fence *WorkerFence,
 ) *OpsAlertEvaluatorService {
 	svc := NewOpsAlertEvaluatorService(opsService, opsRepo, emailService, redisClient, cfg, proxyRepo)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -356,20 +473,31 @@ func ProvideOpsCleanupService(
 	channelMonitorSvc *ChannelMonitorService,
 	settingRepo SettingRepository,
 	opsService *OpsService,
+	fence *WorkerFence,
 ) *OpsCleanupService {
 	svc := NewOpsCleanupService(opsRepo, db, redisClient, cfg, channelMonitorSvc, settingRepo)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	if opsService != nil {
 		opsService.SetCleanupReloader(svc)
 	}
 	return svc
 }
 
-func ProvideOpsSystemLogSink(opsRepo OpsRepository) *OpsSystemLogSink {
+func ProvideOpsSystemLogSink(opsRepo OpsRepository, fence *WorkerFence) *OpsSystemLogSink {
 	sink := NewOpsSystemLogSink(opsRepo)
-	sink.Start()
-	logger.SetSink(sink)
+	if fence == nil || fence.WorkersEnabled() {
+		sink.Start()
+		logger.SetSink(sink)
+	}
 	return sink
+}
+
+// ProvideAuditLogService 创建操作审计日志服务并启动异步写入与保留期清理协程。
+// 停止逻辑挂在 cmd/server 的 provideCleanup。
+func ProvideAuditLogService(repo AuditLogRepository, settingService *SettingService, fence *WorkerFence) *AuditLogService {
+	svc := NewAuditLogService(repo, settingService)
+	startSingletonWorker(fence, svc.Start)
+	return svc
 }
 
 func buildIdempotencyConfig(cfg *config.Config) IdempotencyConfig {
@@ -405,9 +533,9 @@ func ProvideSystemOperationLockService(repo IdempotencyRepository, cfg *config.C
 	return NewSystemOperationLockService(repo, buildIdempotencyConfig(cfg))
 }
 
-func ProvideIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config) *IdempotencyCleanupService {
+func ProvideIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config, fence *WorkerFence) *IdempotencyCleanupService {
 	svc := NewIdempotencyCleanupService(repo, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -426,9 +554,10 @@ func ProvideScheduledTestRunnerService(
 	accountTestSvc *AccountTestService,
 	rateLimitSvc *RateLimitService,
 	cfg *config.Config,
+	fence *WorkerFence,
 ) *ScheduledTestRunnerService {
 	svc := NewScheduledTestRunnerService(planRepo, scheduledSvc, accountTestSvc, rateLimitSvc, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -439,17 +568,49 @@ func ProvideOpsScheduledReportService(
 	emailService *EmailService,
 	redisClient *redis.Client,
 	cfg *config.Config,
+	fence *WorkerFence,
 ) *OpsScheduledReportService {
 	svc := NewOpsScheduledReportService(opsService, userService, emailService, redisClient, cfg)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
 // ProvideAPIKeyAuthCacheInvalidator 提供 API Key 认证缓存失效能力
-func ProvideAPIKeyAuthCacheInvalidator(apiKeyService *APIKeyService) APIKeyAuthCacheInvalidator {
+func ProvideAPIKeyAuthCacheInvalidator(apiKeyService *APIKeyService, fence *WorkerFence) APIKeyAuthCacheInvalidator {
 	// Start Pub/Sub subscriber for L1 cache invalidation across instances
-	apiKeyService.StartAuthCacheInvalidationSubscriber(context.Background())
+	startSingletonWorker(fence, func() {
+		apiKeyService.StartAuthCacheInvalidationSubscriber(context.Background())
+	})
 	return apiKeyService
+}
+
+// ProvideImageStorageSettingService 构造异步生图对象存储的后台设置服务。
+//
+// config.yaml 里的 image_storage 作为回落：后台从未保存过设置时沿用它，
+// 使升级前已通过配置文件开启该功能的部署不被打断。
+func ProvideImageStorageSettingService(
+	settingRepo SettingRepository,
+	encryptor SecretEncryptor,
+	backup *BackupService,
+	factory ImageStorageFactory,
+	cfg *config.Config,
+) *ImageStorageSettingService {
+	if cfg.ImageStorage.Enabled && !cfg.ImageStorage.Active() {
+		// 列出具体缺失的键。若这些键其实已在环境变量里设过，说明它们没被读进来，
+		// 请确认 setDefaults 中已为其注册默认值（见 config.setEnvReachableDefaults）。
+		logger.L().Warn("image_storage.enabled is true in config but object storage is not fully configured; configure it in the admin UI or complete the config file",
+			zap.Strings("missing_keys", cfg.ImageStorage.MissingCredentialKeys()))
+	}
+	return NewImageStorageSettingService(settingRepo, encryptor, backup, factory, cfg.ImageStorage)
+}
+
+// ProvideImageTaskService 构造异步图片任务服务。
+//
+// 对象存储是异步图片任务的启用前提：仅当开关打开且凭证齐全时功能才可用，否则整体禁用
+// （handler 返回 404，不创建任务、不写 Redis），从而避免大 base64 结果撑爆 Redis。
+// 启用状态由 settings 服务在运行时解析，因此后台改开关后无需重启即可生效。
+func ProvideImageTaskService(store ImageTaskStore, settings *ImageStorageSettingService) *ImageTaskService {
+	return NewImageTaskServiceWithResolver(store, settings.Resolver(), defaultImageTaskTTL, defaultImageTaskExecutionTimeout)
 }
 
 // ProvideBackupService creates and starts BackupService
@@ -459,9 +620,10 @@ func ProvideBackupService(
 	encryptor SecretEncryptor,
 	storeFactory BackupObjectStoreFactory,
 	dumper DBDumper,
+	fence *WorkerFence,
 ) *BackupService {
 	svc := NewBackupService(settingRepo, cfg, encryptor, storeFactory, dumper)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -482,6 +644,9 @@ func ProvideOpsService(
 	antigravityGatewayService *AntigravityGatewayService,
 	systemLogSink *OpsSystemLogSink,
 	settingService *SettingService,
+	authCacheInvalidationWorker *AuthCacheInvalidationWorker,
+	apiKeyService *APIKeyService,
+	fence *WorkerFence,
 ) *OpsService {
 	svc := NewOpsService(
 		opsRepo,
@@ -502,22 +667,42 @@ func ProvideOpsService(
 		// a populated cache rather than zero defaults. Best-effort, sync-bounded.
 		settingService.WarmOpenAIQuotaAutoPauseSettings(context.Background())
 	}
+	svc.authCacheInvalidationWorker = authCacheInvalidationWorker
+	svc.apiKeyService = apiKeyService
+	startSingletonWorker(fence, func() {
+		svc.StartRuntimeSettingsRefresh(context.Background())
+	})
 	return svc
 }
 
+// ProvideOpsIngressRejectAggregator starts the bounded security aggregation
+// runtime and attaches it to OpsService, which is the middleware recorder.
+func ProvideOpsIngressRejectAggregator(opsRepo OpsRepository, opsService *OpsService, fence *WorkerFence) *OpsIngressRejectAggregator {
+	repo, ok := opsRepo.(OpsIngressRejectRepository)
+	if !ok {
+		return nil
+	}
+	aggregator := NewOpsIngressRejectAggregator(repo)
+	startSingletonWorker(fence, aggregator.Start)
+	opsService.SetIngressRejectAggregator(aggregator)
+	return aggregator
+}
+
 // ProvideSettingService wires SettingService with group reader and proxy repo.
-func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) *SettingService {
+func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config, fence *WorkerFence) *SettingService {
 	svc := NewSettingService(settingRepo, cfg)
 	svc.SetDefaultSubscriptionGroupReader(groupRepo)
 	svc.SetProxyRepository(proxyRepo)
-	if err := svc.LoadAPIKeyACLTrustForwardedIPSetting(context.Background()); err != nil {
-		logger.LegacyPrintf("service.setting", "Warning: load api key acl forwarded ip setting failed: %v", err)
+	if err := svc.LoadForwardedClientIPSettings(context.Background()); err != nil {
+		logger.LegacyPrintf("service.setting", "Warning: load forwarded client IP settings failed: %v", err)
 	}
-	if err := svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()); err != nil {
-		logger.LegacyPrintf("service.setting", "Warning: migrate openai allow Claude Code Codex plugin setting failed: %v", err)
-	}
-	if err := svc.MigrateCodexBodyFingerprintToSignals(context.Background()); err != nil {
-		logger.LegacyPrintf("service.setting", "Warning: migrate codex body fingerprint to signals failed: %v", err)
+	if fence == nil || fence.WorkersEnabled() {
+		if err := svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()); err != nil {
+			logger.LegacyPrintf("service.setting", "Warning: migrate openai allow Claude Code Codex plugin setting failed: %v", err)
+		}
+		if err := svc.MigrateCodexBodyFingerprintToSignals(context.Background()); err != nil {
+			logger.LegacyPrintf("service.setting", "Warning: migrate codex body fingerprint to signals failed: %v", err)
+		}
 	}
 	antigravity.SetUserAgentVersionResolver(svc.GetAntigravityUserAgentVersion)
 	return svc
@@ -533,8 +718,43 @@ func ProvideBillingCacheService(
 	rateRepo UserGroupRateRepository,
 	cfg *config.Config,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	fence *WorkerFence,
 ) *BillingCacheService {
-	return NewBillingCacheService(cache, userRepo, subRepo, apiKeyRepo, rpmCache, rateRepo, cfg, userPlatformQuotaRepo)
+	return newBillingCacheService(cache, userRepo, subRepo, apiKeyRepo, rpmCache, rateRepo, cfg, userPlatformQuotaRepo, shouldStartBackgroundWorkers(fence))
+}
+
+// ProvideSubscriptionService keeps standby subscription reads available while
+// suppressing its maintenance queue and cache invalidation subscriber.
+func ProvideSubscriptionService(
+	groupRepo GroupRepository,
+	userSubRepo UserSubscriptionRepository,
+	billingCacheService *BillingCacheService,
+	entClient *dbent.Client,
+	cfg *config.Config,
+	fence *WorkerFence,
+) *SubscriptionService {
+	return newSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg, shouldStartBackgroundWorkers(fence), !isStandbyFence(fence))
+}
+
+// ProvideUsageRecordWorkerPool returns an inert pool on standby so usage
+// recording cannot execute or synchronously fall back there.
+func ProvideUsageRecordWorkerPool(cfg *config.Config, fence *WorkerFence) *UsageRecordWorkerPool {
+	return NewUsageRecordWorkerPoolForRuntime(cfg, fence)
+}
+
+// ProvideContentModerationService keeps synchronous moderation dependencies
+// available while suppressing asynchronous workers on standby.
+func ProvideContentModerationService(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	fence *WorkerFence,
+) *ContentModerationService {
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, shouldStartBackgroundWorkers(fence))
 }
 
 // ProvideAPIKeyService wires APIKeyService and connects rate-limit cache invalidation.
@@ -558,11 +778,15 @@ func ProvideAPIKeyService(
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
+	ProvideWorkerFence,
 	NewAuthService,
+	NewPasskeyService,
 	NewUserService,
 	ProvideAPIKeyService,
 	ProvideAPIKeyAuthCacheInvalidator,
+	ProvideAuthCacheInvalidationWorker,
 	NewGroupService,
+	NewCompositeRouteResolver,
 	NewAccountService,
 	NewProxyService,
 	NewRedeemService,
@@ -576,20 +800,24 @@ var ProviderSet = wire.NewSet(
 	NewAdminService,
 	NewGatewayService,
 	NewOpenAIGatewayService,
+	ProvideImageStorageSettingService,
+	ProvideImageTaskService,
 	ProvideBatchImageModelPricingResolver,
 	NewBatchImagePublicService,
 	NewBatchImageDownloadService,
 	ProvideBatchImageCleanupService,
 	ProvideBatchImageWorkerRuntime,
 	wire.Bind(new(AccountRuntimeBlocker), new(*OpenAIGatewayService)),
-	NewOAuthService,
+	ProvideOAuthSessionStore,
+	ProvideOAuthService,
 	ProvideOpenAIOAuthService,
-	NewGrokOAuthService,
-	NewGeminiOAuthService,
+	ProvideGrokOAuthService,
+	wire.Bind(new(GrokOAuthTokenService), new(*GrokOAuthService)),
+	ProvideGeminiOAuthService,
 	NewGeminiQuotaService,
 	NewCompositeTokenCacheInvalidator,
 	wire.Bind(new(TokenCacheInvalidator), new(*CompositeTokenCacheInvalidator)),
-	NewAntigravityOAuthService,
+	ProvideAntigravityOAuthService,
 	ProvideOAuthRefreshAPI,
 	ProvideGeminiTokenProvider,
 	NewGeminiMessagesCompatService,
@@ -601,13 +829,17 @@ var ProviderSet = wire.NewSet(
 	ProvideClaudeTokenProvider,
 	NewAntigravityGatewayService,
 	ProvideRateLimitService,
-	NewAccountUsageService,
-	NewAccountTestService,
+	ProvideAccountUsageService,
+	ProvideAccountTestService,
+	ProvideUpstreamBillingProbeService,
+	ProvideOllamaCloudUsageService,
 	ProvideSettingService,
 	NewDataManagementService,
 	ProvideBackupService,
 	ProvideOpsSystemLogSink,
 	ProvideOpsService,
+	ProvideOpsIngressRejectAggregator,
+	ProvideAuditLogService,
 	ProvideOpsMetricsCollector,
 	ProvideOpsAggregationService,
 	ProvideOpsAlertEvaluatorService,
@@ -617,16 +849,17 @@ var ProviderSet = wire.NewSet(
 	NewNotificationEmailService,
 	ProvideEmailQueueService,
 	NewTurnstileService,
-	NewSubscriptionService,
+	ProvideSubscriptionService,
 	wire.Bind(new(DefaultSubscriptionAssigner), new(*SubscriptionService)),
 	ProvideConcurrencyService,
 	ProvideUserMessageQueueService,
-	NewUsageRecordWorkerPool,
+	ProvideUsageRecordWorkerPool,
 	ProvideSchedulerSnapshotService,
 	NewIdentityService,
 	NewCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
+	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
 	ProvideAccountExpiryService,
 	ProvideProxyExpiryService,
 	ProvideSubscriptionExpiryService,
@@ -650,7 +883,7 @@ var ProviderSet = wire.NewSet(
 	NewGroupCapacityService,
 	NewChannelService,
 	NewModelPricingResolver,
-	NewContentModerationService,
+	ProvideContentModerationService,
 	NewAffiliateService,
 	ProvidePaymentConfigService,
 	ProvidePaymentService,
@@ -663,9 +896,9 @@ var ProviderSet = wire.NewSet(
 )
 
 // ProvideUserPlatformQuotaUsageFlusher 创建并启动 UserPlatformQuotaUsageFlusher。
-func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache, quotaRepo UserPlatformQuotaRepository, tw *TimingWheelService) *UserPlatformQuotaUsageFlusher {
+func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache, quotaRepo UserPlatformQuotaRepository, tw *TimingWheelService, fence *WorkerFence) *UserPlatformQuotaUsageFlusher {
 	svc := NewUserPlatformQuotaUsageFlusher(cfg, cache, quotaRepo, tw)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -690,10 +923,10 @@ func ProvidePaymentService(entClient *dbent.Client, registry *payment.Registry, 
 }
 
 // ProvidePaymentOrderExpiryService creates and starts PaymentOrderExpiryService.
-func ProvidePaymentOrderExpiryService(paymentSvc *PaymentService, lockCache LeaderLockCache, db *sql.DB) *PaymentOrderExpiryService {
+func ProvidePaymentOrderExpiryService(paymentSvc *PaymentService, lockCache LeaderLockCache, db *sql.DB, fence *WorkerFence) *PaymentOrderExpiryService {
 	svc := NewPaymentOrderExpiryService(paymentSvc, 60*time.Second)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	startSingletonWorker(fence, svc.Start)
 	return svc
 }
 
@@ -710,9 +943,9 @@ func ProvideChannelMonitorService(
 // 通过 SetScheduler 注入回 service 后再 Start，确保启动时加载所有 enabled monitor，
 // 后续 CRUD 也能即时同步任务表。Runner.Stop 由 cleanup function 调用。
 // settingService 用于 runner 每次 fire 读取功能开关。
-func ProvideChannelMonitorRunner(svc *ChannelMonitorService, settingService *SettingService) *ChannelMonitorRunner {
+func ProvideChannelMonitorRunner(svc *ChannelMonitorService, settingService *SettingService, fence *WorkerFence) *ChannelMonitorRunner {
 	r := NewChannelMonitorRunner(svc, settingService)
 	svc.SetScheduler(r)
-	r.Start()
+	startSingletonWorker(fence, r.Start)
 	return r
 }

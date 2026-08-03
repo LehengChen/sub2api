@@ -22,12 +22,40 @@ type SystemHandler struct {
 	lockSvc   *service.SystemOperationLockService
 }
 
+// systemUpdateTimeout bounds a full in-place update or rollback: the release
+// manifest fetch plus a large binary download over slow links. It must stay
+// above the GitHub download client timeout (10 minutes) so the download owns
+// its own deadline.
+const systemUpdateTimeout = 15 * time.Minute
+
+// systemUpdateContext detaches a long-running update/rollback from the HTTP
+// request lifetime. Browsers and reverse proxies commonly abort idle requests
+// after 30-60s (axios default, nginx proxy_read_timeout), which canceled
+// c.Request.Context() mid-download and killed the update with
+// "download failed: context canceled" (#4504). The swap keeps running after a
+// client disconnect; a later retry then hits the system operation lock or
+// reports "Already up to date".
+func systemUpdateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(base, systemUpdateTimeout)
+}
+
 type systemUpdateService interface {
 	CheckUpdate(ctx context.Context, force bool) (*service.UpdateInfo, error)
 	PerformUpdate(ctx context.Context) error
 	Rollback() error
 	ListRollbackVersions(ctx context.Context) ([]service.RollbackVersion, error)
 	RollbackToVersion(ctx context.Context, version string) error
+}
+
+// deploymentControlReader is kept optional so lightweight test doubles and
+// older integrations remain source-compatible. The concrete UpdateService
+// always implements it, and its own mutation methods enforce the same policy.
+type deploymentControlReader interface {
+	IsExternallyManaged() bool
 }
 
 // NewSystemHandler creates a new SystemHandler
@@ -41,9 +69,22 @@ func NewSystemHandler(updateSvc systemUpdateService, lockSvc *service.SystemOper
 // GetVersion returns the current version
 // GET /api/v1/admin/system/version
 func (h *SystemHandler) GetVersion(c *gin.Context) {
-	info, _ := h.updateSvc.CheckUpdate(c.Request.Context(), false)
+	info, err := h.updateSvc.CheckUpdate(c.Request.Context(), false)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if info == nil {
+		response.Error(c, http.StatusServiceUnavailable, "version information unavailable")
+		return
+	}
 	response.Success(c, gin.H{
-		"version": info.CurrentVersion,
+		"version":            info.CurrentVersion,
+		"deployment_mode":    info.DeploymentMode,
+		"managed_externally": info.ManagedExternally,
+		"capabilities":       info.Capabilities,
+		"catalog":            info.Catalog,
+		"catalog_status":     info.CatalogStatus,
 	})
 }
 
@@ -62,6 +103,9 @@ func (h *SystemHandler) CheckUpdates(c *gin.Context) {
 // PerformUpdate downloads and applies the update
 // POST /api/v1/admin/system/update
 func (h *SystemHandler) PerformUpdate(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	operationID := buildSystemOperationID(c, "update")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.update", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {
@@ -75,9 +119,12 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 			release(releaseReason, succeeded)
 		}()
 
-		if err := h.updateSvc.PerformUpdate(ctx); err != nil {
+		updateCtx, cancel := systemUpdateContext(ctx)
+		defer cancel()
+
+		if err := h.updateSvc.PerformUpdate(updateCtx); err != nil {
 			if errors.Is(err, service.ErrNoUpdateAvailable) {
-				info, checkErr := h.updateSvc.CheckUpdate(ctx, false)
+				info, checkErr := h.updateSvc.CheckUpdate(updateCtx, false)
 				if checkErr != nil {
 					releaseReason = "SYSTEM_UPDATE_FAILED"
 					return nil, checkErr
@@ -107,9 +154,12 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 // GetRollbackVersions lists versions available for rollback
 // GET /api/v1/admin/system/rollback-versions
 func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	versions, err := h.updateSvc.ListRollbackVersions(c.Request.Context())
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, err.Error())
+		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, gin.H{
@@ -123,6 +173,9 @@ func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
 // installs that specific release (must be one of the recent rollback versions).
 // POST /api/v1/admin/system/rollback
 func (h *SystemHandler) Rollback(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	var req struct {
 		Version string `json:"version"`
 	}
@@ -152,7 +205,10 @@ func (h *SystemHandler) Rollback(c *gin.Context) {
 		}()
 
 		if targetVersion != "" {
-			err = h.updateSvc.RollbackToVersion(ctx, targetVersion)
+			// 指定版本回退同样要下载完整二进制，与更新一样和请求生命周期解耦。
+			rollbackCtx, cancel := systemUpdateContext(ctx)
+			defer cancel()
+			err = h.updateSvc.RollbackToVersion(rollbackCtx, targetVersion)
 		} else {
 			err = h.updateSvc.Rollback()
 		}
@@ -174,6 +230,9 @@ func (h *SystemHandler) Rollback(c *gin.Context) {
 // RestartService restarts the systemd service
 // POST /api/v1/admin/system/restart
 func (h *SystemHandler) RestartService(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	operationID := buildSystemOperationID(c, "restart")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.restart", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {
@@ -199,6 +258,15 @@ func (h *SystemHandler) RestartService(c *gin.Context) {
 			"operation_id": lock.OperationID(),
 		}, nil
 	})
+}
+
+func (h *SystemHandler) rejectExternallyManaged(c *gin.Context) bool {
+	reader, ok := h.updateSvc.(deploymentControlReader)
+	if !ok || !reader.IsExternallyManaged() {
+		return false
+	}
+	response.ErrorFrom(c, service.ErrExternallyManaged)
+	return true
 }
 
 func (h *SystemHandler) acquireSystemLock(

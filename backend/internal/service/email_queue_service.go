@@ -31,10 +31,16 @@ type EmailQueueService struct {
 	wg           sync.WaitGroup
 	stopChan     chan struct{}
 	workers      int
+	disabled     bool
+	stopOnce     sync.Once
 }
 
 // NewEmailQueueService 创建邮件队列服务
 func NewEmailQueueService(emailService *EmailService, workers int) *EmailQueueService {
+	return newEmailQueueService(emailService, workers, true)
+}
+
+func newEmailQueueService(emailService *EmailService, workers int, startWorkers bool) *EmailQueueService {
 	if workers <= 0 {
 		workers = 3 // 默认3个工作协程
 	}
@@ -44,10 +50,13 @@ func NewEmailQueueService(emailService *EmailService, workers int) *EmailQueueSe
 		taskChan:     make(chan EmailTask, 100), // 缓冲100个任务
 		stopChan:     make(chan struct{}),
 		workers:      workers,
+		disabled:     !startWorkers,
 	}
 
-	// 启动工作协程
-	service.start()
+	if startWorkers {
+		// 启动工作协程
+		service.start()
+	}
 
 	return service
 }
@@ -101,6 +110,9 @@ func (s *EmailQueueService) processTask(workerID int, task EmailTask) {
 
 // EnqueueVerifyCode 将验证码发送任务加入队列
 func (s *EmailQueueService) EnqueueVerifyCode(email, siteName string, locale ...string) error {
+	if s == nil || s.disabled {
+		return fmt.Errorf("email queue workers disabled")
+	}
 	task := EmailTask{
 		Email:    email,
 		SiteName: siteName,
@@ -119,6 +131,9 @@ func (s *EmailQueueService) EnqueueVerifyCode(email, siteName string, locale ...
 
 // EnqueuePasswordReset 将密码重置邮件任务加入队列
 func (s *EmailQueueService) EnqueuePasswordReset(email, siteName, resetURL string, locale ...string) error {
+	if s == nil || s.disabled {
+		return fmt.Errorf("email queue workers disabled")
+	}
 	task := EmailTask{
 		Email:    email,
 		SiteName: siteName,
@@ -138,7 +153,12 @@ func (s *EmailQueueService) EnqueuePasswordReset(email, siteName, resetURL strin
 
 // Stop 停止队列服务
 func (s *EmailQueueService) Stop() {
-	close(s.stopChan)
-	s.wg.Wait()
-	logger.LegacyPrintf("service.email_queue", "%s", "[EmailQueue] All workers stopped")
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		close(s.stopChan)
+		s.wg.Wait()
+		logger.LegacyPrintf("service.email_queue", "%s", "[EmailQueue] All workers stopped")
+	})
 }

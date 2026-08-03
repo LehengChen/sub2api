@@ -112,8 +112,21 @@ func NewUsageRecordWorkerPool(cfg *config.Config) *UsageRecordWorkerPool {
 	return NewUsageRecordWorkerPoolWithOptions(opts)
 }
 
+// NewUsageRecordWorkerPoolForRuntime constructs an inert pool for a standby
+// process. The returned object remains safe to inject into gateway handlers,
+// but it has no pond pool and therefore cannot execute or synchronously fall
+// back usage-record tasks on the standby.
+func NewUsageRecordWorkerPoolForRuntime(cfg *config.Config, fence *WorkerFence) *UsageRecordWorkerPool {
+	opts := usageRecordPoolOptionsFromConfig(cfg)
+	return newUsageRecordWorkerPoolWithOptions(opts, shouldStartBackgroundWorkers(fence))
+}
+
 // NewUsageRecordWorkerPoolWithOptions 根据给定参数构建使用量记录池。
 func NewUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions) *UsageRecordWorkerPool {
+	return newUsageRecordWorkerPoolWithOptions(opts, true)
+}
+
+func newUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions, startWorkers bool) *UsageRecordWorkerPool {
 	opts = normalizeUsageRecordPoolOptions(opts)
 
 	p := &UsageRecordWorkerPool{
@@ -131,12 +144,14 @@ func NewUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions) *Usa
 		autoScaleCooldown:     opts.AutoScaleCooldown,
 	}
 
-	p.pool = pond.NewPool(
-		opts.WorkerCount,
-		pond.WithQueueSize(opts.QueueSize),
-	)
-	if p.autoScaleEnabled {
-		p.startAutoScaler()
+	if startWorkers {
+		p.pool = pond.NewPool(
+			opts.WorkerCount,
+			pond.WithQueueSize(opts.QueueSize),
+		)
+		if p.autoScaleEnabled {
+			p.startAutoScaler()
+		}
 	}
 	return p
 }

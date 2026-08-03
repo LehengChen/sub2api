@@ -11,6 +11,25 @@ export interface ReleaseInfo {
   html_url: string
 }
 
+export interface ReleaseCatalog {
+  source?: string
+  revision?: string
+  version?: string
+  app_tag?: string
+  source_repository?: string
+  source_revision?: string
+  image_tag?: string
+  image_digest?: string
+  ops_revision?: string
+}
+
+export interface UpdateCapabilities {
+  check_updates: boolean
+  update: boolean
+  rollback: boolean
+  restart: boolean
+}
+
 export interface VersionInfo {
   current_version: string
   latest_version: string
@@ -19,6 +38,12 @@ export interface VersionInfo {
   cached: boolean
   warning?: string
   build_type: string // "source" for manual builds, "release" for CI builds
+  deployment_mode?: 'self_managed' | 'externally_managed' | string
+  managed_externally?: boolean
+  capabilities?: UpdateCapabilities
+  catalog?: ReleaseCatalog
+  catalog_status?: 'valid' | 'incomplete' | string
+  check_status?: 'fresh' | 'cached' | 'error' | 'managed' | 'unconfigured' | string
 }
 
 /**
@@ -62,11 +87,21 @@ export async function getRollbackVersions(): Promise<{ versions: RollbackVersion
 }
 
 /**
+ * In-place update/rollback downloads a full release binary from GitHub, which
+ * can take several minutes on slow links. The global 30s axios timeout would
+ * abort the request mid-download (#4504), so these calls wait as long as the
+ * backend allows (15 minutes server-side).
+ */
+const UPDATE_REQUEST_TIMEOUT_MS = 15 * 60 * 1000
+
+/**
  * Perform system update
  * Downloads and applies the latest version
  */
 export async function performUpdate(): Promise<UpdateResult> {
-  const { data } = await apiClient.post<UpdateResult>('/admin/system/update')
+  const { data } = await apiClient.post<UpdateResult>('/admin/system/update', undefined, {
+    timeout: UPDATE_REQUEST_TIMEOUT_MS
+  })
   return data
 }
 
@@ -77,7 +112,8 @@ export async function performUpdate(): Promise<UpdateResult> {
 export async function rollback(version?: string): Promise<UpdateResult> {
   const { data } = await apiClient.post<UpdateResult>(
     '/admin/system/rollback',
-    version ? { version } : undefined
+    version ? { version } : undefined,
+    { timeout: UPDATE_REQUEST_TIMEOUT_MS }
   )
   return data
 }

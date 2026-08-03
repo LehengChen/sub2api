@@ -54,20 +54,30 @@ type SubscriptionService struct {
 	subCacheTTL    time.Duration
 	subCacheJitter int // 抖动百分比
 
-	maintenanceQueue *SubscriptionMaintenanceQueue
+	maintenanceQueue    *SubscriptionMaintenanceQueue
+	maintenanceDisabled bool
 }
 
 // NewSubscriptionService 创建订阅服务
 func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscriptionRepository, billingCacheService *BillingCacheService, entClient *dbent.Client, cfg *config.Config) *SubscriptionService {
+	return newSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg, true, true)
+}
+
+func newSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscriptionRepository, billingCacheService *BillingCacheService, entClient *dbent.Client, cfg *config.Config, startWorkers bool, initializeCache bool) *SubscriptionService {
 	svc := &SubscriptionService{
 		groupRepo:           groupRepo,
 		userSubRepo:         userSubRepo,
 		billingCacheService: billingCacheService,
 		entClient:           entClient,
+		maintenanceDisabled: !startWorkers,
 	}
-	svc.initSubCache(cfg)
-	svc.initMaintenanceQueue(cfg)
-	svc.StartSubCacheInvalidationSubscriber(context.Background())
+	if initializeCache {
+		svc.initSubCache(cfg)
+	}
+	if startWorkers {
+		svc.initMaintenanceQueue(cfg)
+		svc.StartSubCacheInvalidationSubscriber(context.Background())
+	}
 	return svc
 }
 
@@ -507,6 +517,25 @@ func (s *SubscriptionService) assignSubscriptionWithReuse(ctx context.Context, i
 		sub, getErr := s.userSubRepo.GetByUserIDAndGroupID(ctx, input.UserID, input.GroupID)
 		if getErr != nil {
 			return nil, false, getErr
+		}
+		now := time.Now()
+		if sub.Status == SubscriptionStatusExpired ||
+			(sub.Status != SubscriptionStatusSuspended && !sub.ExpiresAt.After(now)) {
+			validityDays := normalizeAssignValidityDays(input.ValidityDays)
+			newExpiresAt := now.AddDate(0, 0, validityDays)
+			if newExpiresAt.After(MaxExpiresAt) {
+				newExpiresAt = MaxExpiresAt
+			}
+			renewalNotes := input.Notes
+			if strings.TrimSpace(sub.Notes) == strings.TrimSpace(input.Notes) {
+				renewalNotes = ""
+			}
+			if err := s.updateExistingSubscriptionTerm(ctx, sub, renewalNotes, now, newExpiresAt, true); err != nil {
+				return nil, false, err
+			}
+			s.maybeInvalidateAssignmentCaches(input.UserID, input.GroupID, false)
+			renewed, getErr := s.userSubRepo.GetByID(ctx, sub.ID)
+			return renewed, true, getErr
 		}
 		if conflictReason, conflict := detectAssignSemanticConflict(sub, input); conflict {
 			return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
@@ -1001,7 +1030,7 @@ func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, grou
 // 而 IsExpired()=true 的订阅在 ValidateAndCheckLimits 中已被拦截返回错误，
 // 因此进入此方法的订阅一定未过期，无需处理过期状态同步。
 func (s *SubscriptionService) DoWindowMaintenance(sub *UserSubscription) {
-	if s == nil {
+	if s == nil || s.maintenanceDisabled {
 		return
 	}
 	if s.maintenanceQueue != nil {
