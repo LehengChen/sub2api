@@ -12,15 +12,19 @@
 - upstream 专用 workflow 必须有 `github.repository == 'Wei-Shaw/sub2api'` 身份 guard。
 - workflow/action 版本、安全例外和 required checks 定期复核。
 
-## 2026-07-13 实际观察
+## 2026-08-03 实际观察（Asia/Tokyo）
 
-- GitHub 默认分支为 `main`；本次整理后已包含 `AGENTS.md`、运维入口、CI 安全门禁和维护模板，新 clone 可以直接接手。
-- Actions 权限为 enabled；本次整理 push 后，API 已回读到 4 个 active workflows。历史 deployed application tag 的 check-run 仍为 0，因此不能追溯性地声称该版本经过 fork CI；新的 candidate 必须引用实际成功 run。
-- `main`、当前 release 没有 branch protection，也没有 repository ruleset。
-- upstream `release.yml` 仍有 `workflow_dispatch`、`contents: write` 和发布逻辑。本次维护变更已给所有 job（包括实际 push 默认分支的 job）加入 upstream repository 身份 guard，并已进入 fork `main`。Frenzy 仍需要独立 build-only workflow。
-- 本次维护变更删除了三个已过期且当前 audit 不再命中的例外，把剩余 xlsx 例外 owner 改为仓库责任人，并让 validator 全局拒绝过期/占位 owner。两个 xlsx 高危例外仍有效至 2026-10-06，必须在到期前升级、移除或重新获得有依据的审批。
+- 仓库为 public fork，默认分支为 `main`；远端 `main` 可读取 `AGENTS.md`，新 clone 有接手入口。
+- API 回读到 5 个 active workflows：CI、CLA Assistant、Frenzy Candidate、Release 和
+  Security Scan。workflow 默认权限为 `read`，且不允许 workflow 批准 pull request review。
+- `main` 没有 branch protection，仓库也没有 repository ruleset；因此 force-push、删除、
+  required checks 和 tag immutability 仍未由 GitHub 服务端强制执行。
+- Frenzy Candidate 已提供独立候选流水线；每次 release 仍必须引用与目标 SHA 对应的实际
+  run/check 证据，不能由 workflow 文件存在反推某个历史 tag 已通过。
+- `.github/audit-exceptions.yml` 仍有两个 `xlsx` 例外，截止日期为 2026-10-06；必须在到期前
+  由实际依赖审计决定删除、升级或重新审批，不能仅凭迁移文档中的依赖替换描述提前关闭。
 
-这些是风险登记，不是本轮文档提交自动修复的外部状态。
+这些是 2026-08-03 的只读外部事实和风险登记，不是本轮文档提交自动修复的 GitHub 设置。
 
 ## 只读核验
 

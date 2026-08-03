@@ -4,11 +4,13 @@
 
 ## 当前事实
 
-截至 2026-08-01（Asia/Tokyo），应用源码中的 `/livez` 只证明进程 HTTP listener 可响应；
+截至 2026-08-03（Asia/Tokyo），已发布的
+`frenzy/app/v0.1.169-c68b4c8b.2` 源码中，`/livez` 只证明进程 HTTP listener 可响应；
 `/readyz` 会在同一个有界 probe context 内检查初始化、drain、进程角色、worker fencing
 lease、PostgreSQL、Redis、migration checksum，以及 worker 角色的 scheduler 首次 rebuild。
 probe 响应只输出 `ok`/`failed`，不会回传可能含连接信息的底层错误。该源码事实不自动证明
-已经部署到生产；生产事实仍须从私有 release manifest 和 running artifact 闭环核对。
+部署状态；私有 release manifest 与 running artifact 已另行确认该 source 在受控的 externally
+managed 环境激活，环境身份与 artifact digest 不在公开契约复制。
 
 生产镜像自身的 Docker `HEALTHCHECK` 使用 `/livez`，只负责进程存活；Compose 和示例
 Caddy 的流量健康检查使用 `/readyz`。`/health` 继续作为旧部署兼容别名，但新的负载均衡
@@ -29,12 +31,16 @@ quota final flush` 严格串行，再并行停止其余独立后台服务，最�
 context，因此完整应用清理仍没有统一硬时限；systemd/container 的最终停止上限和生产实际
 排空耗时必须通过候选演练测量，不能从 HTTP shutdown timeout 推算。
 
-截至 2026-08-01 的 `v0.1.169` integration candidate 已保留并扩展显式 `active`、`standby`、`worker`、
+当前 v0.1.169 release 已保留并扩展显式 `active`、`standby`、`worker`、
 `api`、`migrator` 角色、migration-only 启动、Redis worker lease/fencing token 和 scheduler
-首次 rebuild readiness。以上仍是未部署候选事实，不代表生产已启用双 Center；完整边界和
-人工切换顺序见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)。
+首次 rebuild readiness。stop-first 人工冷备切换路径已在受控 externally managed 部署中
+演练；这只证明人工控制路径可执行，不证明混合版本滚动、active-active、自动故障切换或
+零中断。完整边界见 [`MULTI_CENTER_RUNTIME.md`](MULTI_CENTER_RUNTIME.md)，环境证据仍留在私有 ops。
 
-截至 2026-07-13，当前部署版本存在以下边界：
+### 历史运行快照：v0.1.151（2026-07-13）
+
+以下边界描述升级前的 v0.1.151，已被上述 v0.1.169 源码与部署结论取代；保留它用于解释
+本契约为何把并发状态、OAuth session、readiness 和 drain 作为硬门禁。
 
 - `/health` 固定返回 200，只证明 HTTP 进程可以响应，不检查 PostgreSQL、Redis、migration 或账号调度。
 - 没有真正的 `/readyz`；未知路由可能落入前端 SPA，不能被当作 readiness。
@@ -45,9 +51,11 @@ context，因此完整应用清理仍没有统一硬时限；systemd/container �
 - `ConcurrencyService` 启动时把非本进程 request-prefix 的 Redis account/user slot 当作 stale 清理，并删除共享等待计数；第二个健康 Center 启动会破坏第一个 Center 的在途并发状态。修复前禁止双活或滚动重叠。
 - xAI 与 Antigravity OAuth `SessionStore` 仍是进程内 map；回调落到另一实例时不能读取原 session。
 
-因此，当前单 Center 可以做维护窗口发布，但不满足“无计划中断”的发布契约。
+因此，当时的 v0.1.151 单 Center 只能做维护窗口发布，不满足“无计划中断”的发布契约。
 
-上面的并发清理是多副本 P0 硬阻断，不是“观察后可接受”的风险。目标实现必须让 slot 归属具有可验证的实例 lease/过期语义，不能把“不是我的 prefix”直接等同于“已死进程”；同时要保留崩溃实例残留的有界回收能力。
+该历史并发清理是多副本 P0 硬阻断，不是“观察后可接受”的风险。v0.1.169 已引入实例
+lease/过期语义与共享 OAuth session，并保留崩溃实例残留的有界回收能力；但这仍不替代
+N/N-1 混合版本、所有关键写路径 fencing 和双进程 integration 证明。
 
 ## 目标端点
 
@@ -141,7 +149,8 @@ Release C: contract，确认回滚窗口结束后清理
 
 ## 多副本后台任务门禁
 
-进入双 Center 前，逐项列出所有启动 goroutine/cron/queue worker，并确认：
+进入 active-active、自动故障切换或有流量重叠的 rolling 前，逐项列出所有启动
+goroutine/cron/queue worker，并确认：
 
 - leader lock key 全局唯一；
 - lock TTL 大于任务最坏运行时间；
@@ -152,7 +161,7 @@ Release C: contract，确认回滚窗口结束后清理
 
 代码中已有的 leader-lock helper 是基础，不是完成证明。验收需要真正的双进程 integration test 与生产 canary 观察。
 
-进入双 Center 前还必须完成：
+进入 active-active、自动故障切换或有流量重叠的 rolling 前还必须完成：
 
 - 两个实例同时持有 account/user slots 时，任一实例启动或退出都不会删除另一个实例的活动 slot/waiter；
 - crash 后的 slot 能在明确 TTL/lease 后回收，且并发限额不会永久泄漏；

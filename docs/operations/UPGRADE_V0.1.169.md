@@ -1,10 +1,29 @@
-# v0.1.169 Upstream 集成兼容性记录
+# v0.1.169 Upstream 集成与发布记录
 
-状态：`integration`，不可 promotion。观察时区：`Asia/Tokyo`；观察日期：2026-08-01。
-本记录描述源码集成和验证边界，不代表生产已更新。生产部署仍必须从私有 ops 的
-stable release manifest 闭环 `app tag -> source SHA -> image digest -> config revision -> ops revision`。
+## 当前结果（2026-08-03，Asia/Tokyo）
 
-## 身份
+| 项目 | 结论 |
+|---|---|
+| upstream 输入 | `v0.1.169`，tag object `830b5f507396b858874b171feae1cbcfce1caded`，peeled commit `26d894ef4f50645a4bf1030e378ac892f17d0223` |
+| published app tag | `frenzy/app/v0.1.169-c68b4c8b.2` |
+| published source | `c68b4c8b82d2e8005a02de8ec540589c07272ecb` |
+| release branch | `release/c68b4c8b-frenzy.2` |
+| patch disposition | FZ-001--FZ-009 已按最终 source 冻结，见 [`PATCH_QUEUE.md`](PATCH_QUEUE.md) |
+| deployment conclusion | 私有 manifest 与 running artifact 已确认该 source 在 externally managed 部署中激活；环境身份、digest、配置和 ops revision 不在公开记录复制 |
+| multi-Center conclusion | stop-first 人工冷备切换路径已演练；仍不等于 rolling、active-active、自动故障切换或零中断 |
+
+最终发布必须继续从私有 stable release manifest 闭环
+`app tag -> source SHA -> image digest -> config revision -> ops revision`。公开 tag 或版本字符串
+本身不证明任何环境正在运行该工件。下一次升级应从上述最终 app tag 与私有 stable manifest
+恢复基线，不能继续把下面的 `.6` 候选当成当前状态。
+
+## 历史检查点：`.6` integration candidate（2026-08-01，Asia/Tokyo）
+
+以下内容完整保留当时的源码集成、migration 风险和验证缺口。它是 promotion 之前的历史
+检查点，其中的 `pending`、`not-run`、`not-created` 和“不可 promotion”只描述 `.6` 当时
+状态；它们既不能否定后续发布，也不能替代私有最终 release evidence。
+
+### 身份
 
 ```yaml
 observed_at_tokyo: 2026-08-01
@@ -26,7 +45,7 @@ reviewer: Frenzy maintenance agent
 `0.1.169`，这是标识修正，不是对 upstream tag 内容的隐瞒；release freeze 时必须重新
 记录完整候选 SHA。
 
-## Migration 与数据
+### Migration 与数据
 
 相对已部署 v0.1.151，目标 tag 增加了 172、174--191 范围的表、列、约束、触发器、
 审计/outbox、passkey 和索引 migration（包含同一数字前缀下按完整文件名排序的多个文件）。
@@ -44,7 +63,7 @@ reviewer: Frenzy maintenance agent
 | 仅镜像回滚是否安全 | 否，当前结论为 `database-restore-required-or-maintenance-window`，直到完成 expand/backfill 与旧版本读写测试。 |
 | 需要的快照/PITR 与恢复点 | 当前只核实到历史生产恢复能力/恢复点；针对本次 v0.1.169 migration 的 approved pre-migration snapshot/PITR marker 尚未建立，仍需先完成并做脱敏 rehearsal；本次不执行应用 migration。 |
 
-### v0.1.163 → v0.1.169 新增 SQL migration
+#### v0.1.163 → v0.1.169 新增 SQL migration
 
 以下清单来自源码差异，不代表已经在生产执行。runner 按完整 filename 排序，因此
 数字前缀相同的文件也有确定顺序（例如 `172_composite...` 排在已有的
@@ -61,13 +80,13 @@ reviewer: Frenzy maintenance agent
 | `190_add_users_email_alias_dedup_index_notx.sql` | 非事务 `CREATE INDEX CONCURRENTLY` 表达式索引；可能长时间运行并留下 invalid index。候选 runner 已像 174/175a 一样在重试前精确删除同名 invalid index。 | 独立 migration-only rehearsal、长事务/取消/重试和 invalid-index 清理演练；mock 回归测试不替代真实 PostgreSQL 锁与耗时证据。 |
 | `191_passkey_credentials.sql` | 新增 passkey handle/credential 表及索引；不应自动开启功能。 | RP origin、认证回调、Redis session 和双 Center 共享状态验收后才可 opt-in。 |
 
-### 数据风险重点
+#### 数据风险重点
 
 - `175_default_openai_long_context_billing.sql` 会更新 accounts.extra、创建触发器并写入 scheduler_outbox；不能和应用镜像替换绑定成一次不可回滚操作。
 - `180`/`181`/`182` 会增加审计和 prompt-audit 数据面；retention、访问角色、PITR 暴露和容量预算未获批准，功能不得默认启用。
 - `190..._notx.sql` 必须在独立 migration-only 窗口执行，并验证长事务、重复索引和恢复重试；`f8c285dbd594101c9941a6270507c8dc328a2593` 只补齐 fail-safe runner，不授权生产迁移。
 
-## 配置与接口逐项审查
+### 配置与接口逐项审查
 
 | 领域 | 当前结论 |
 |---|---|
@@ -83,16 +102,16 @@ reviewer: Frenzy maintenance agent
 | upstream URL/redirect/DNS | FZ-008 每跳重新校验 allowlist、HTTPS、端口、userinfo 和私网 DNS；未列出的 host 必须拒绝，需真实网关/出口测试。 |
 | 工具链/生成文件 | Go 1.26.5 本地运行 Ent/Wire 生成检查；Node/pnpm9 lint/typecheck、完整 Vitest（197 files/1356 tests）和先前候选生产构建已通过；`xlsx@0.18.5` 已替换为 `@e965/xlsx@0.20.3`，生产依赖审计结果为 high/critical 0（仍有 low 8、moderate 29）。FZ-009 又把 Dockerfile frontend、Node、Go、Alpine、PostgreSQL 固定到 multi-architecture digest，把 pnpm 固定为 9.15.9；`.6` 已通过 Docker build check，完整 amd64 build/scan/CI 仍须绑定该 tag 重跑。 |
 
-### 不能从当前静态实现推导的能力
+#### 不能从当时静态实现推导的能力
 
 - `WorkerFence.Token()` 当前只在测试/接口层暴露，没有接入关键生产写入的条件更新或数据库约束；`startSingletonWorker` 只在启动时检查 lease。lease 丢失后会触发进程 drain，但不能据此证明所有已启动 worker 已立即停止写入。因此 FZ-007 目前是启动门禁和失租通知，不是完整 write fencing；只能保留审计的手动 failover，禁止 active-active 或自动故障切换。
 - `ValidateResolvedIP` 在 transport 实际拨号前单独做 DNS 查询；当前 HTTP transport 未证明把已校验 IP 固定到 socket，存在 DNS-to-connect TOCTOU。每跳 redirect 校验不能单独宣称已消除代理侧 DNS rebinding，必须用真实网关/出口路径完成审计。
 
-## Patch 处置
+### Patch 处置
 
 详见 [`PATCH_QUEUE.md`](PATCH_QUEUE.md) 的 v0.1.169 表。九项均为 carry/reimplement/recalculate，当前没有任何一项可视为已由 upstream 自动吸收。
 
-## 已完成验证与缺口
+### 当时已完成验证与缺口
 
 ```yaml
 backend_unit: passed `GOMAXPROCS=2 go test -tags=unit ./...`
@@ -133,7 +152,7 @@ final_decision: .6 candidate frozen for CI/artifact validation only; no
   are recorded
 ```
 
-## 下一步与回滚
+### 当时的下一步与回滚
 
 1. 冻结并审查候选源码 SHA，完成 full tests、security scans、amd64 digest/provenance。
 2. 在脱敏生产形状数据库做 migration rehearsal，记录耗时/锁/回滚类别；必要时拆出

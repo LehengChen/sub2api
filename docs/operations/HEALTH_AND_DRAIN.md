@@ -1,8 +1,10 @@
 # Health and Drain Contract
 
-状态：应用源码契约已实现；生产是否激活以私有 release manifest 和实际运行工件为准。
+状态：契约已进入 `frenzy/app/v0.1.169-c68b4c8b.2`；私有 release manifest 与 running
+artifact 已确认该 source 在受控 externally managed 部署中激活，环境身份和工件 digest
+不在本文件复制。
 
-观察/编写时间：2026-07-22（Asia/Tokyo）
+当前状态复核：2026-08-03（Asia/Tokyo）；契约初稿：2026-07-22（Asia/Tokyo）。
 
 ## 端点
 

@@ -353,8 +353,8 @@ Potential improvements:
 
 ## Related Documentation
 
-- [Auth Store Documentation](/src/stores/README.md#auth-store)
-- [AuthLayout Component](/src/components/layout/README.md#authlayout)
-- [Router Configuration](/src/router/index.ts)
-- [API Documentation](/src/api/README.md#authentication)
-- [Type Definitions](/src/types/index.ts)
+- [Auth Store Documentation](../../stores/README.md#auth-store)
+- [AuthLayout Component](../../components/layout/README.md#4-authlayoutvue)
+- [Router Configuration](../../router/index.ts)
+- [Authentication API](../../api/auth.ts)
+- [Type Definitions](../../types/index.ts)

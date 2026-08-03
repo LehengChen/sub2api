@@ -21,13 +21,15 @@
 ```text
 main                                  fork 默认控制分支；文档、CI、已批准维护状态
 integration/v<upstream>-frenzy.<n>    一次 upstream 集成；冲突、补丁重放和验证
-release/v<upstream>-frenzy.<n>        固定候选 SHA 后创建；不继续开发
+release/<source8>-frenzy.<n>           固定候选 SHA 后创建；不继续开发
 contrib/<topic>                       可单独回馈 upstream 的通用修复
-frenzy/app/v<upstream>-frenzy.<n>     指向 release SHA 的不可变 annotated tag
+frenzy/app/v<upstream>-<source8>.<n>   指向 release SHA 的不可变 annotated tag
 refs/tags/upstream/v<upstream>        本地保存的 upstream tag 对象
 ```
 
 历史 release/tag 的命名可能不同，继续保留，不为了统一格式改写历史。新的 release 使用上面的规范。
+`source8` 是已批准完整 source SHA 的前 8 位，仅用于可读名称；创建前必须验证 branch/tag
+不存在，完整 SHA 仍写入 annotated tag、测试证据和私有 release manifest。
 
 ## 同步状态机
 
@@ -172,8 +174,9 @@ PR review 和 required checks 完成后，先记录 PR head 的不可变 `CANDID
 
 ```bash
 CANDIDATE_SHA='<approved-full-sha>'
-RELEASE_BRANCH="release/v${VERSION}-frenzy.${RELEASE_NO}"
-APP_TAG="frenzy/app/v${VERSION}-frenzy.${RELEASE_NO}"
+CANDIDATE_SHORT="$(printf '%.8s' "$CANDIDATE_SHA")"
+RELEASE_BRANCH="release/${CANDIDATE_SHORT}-frenzy.${RELEASE_NO}"
+APP_TAG="frenzy/app/v${VERSION}-${CANDIDATE_SHORT}.${RELEASE_NO}"
 
 test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test -z "$(git status --porcelain)"

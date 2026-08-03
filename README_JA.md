@@ -659,7 +659,7 @@ go generate ./cmd/server
 
 - 有効化: 環境変数 `RUN_MODE=simple` を設定
 - 違い: SaaS 関連機能を非表示にし、課金プロセスをスキップ
-- セキュリティに関する注意: 本番環境では `SIMPLE_MODE_CONFIRM=true` も設定する必要があります
+- 本番環境に関する注意: デプロイシステムで `RUN_MODE` を明示的に設定してください。アプリケーションに Simple Mode 用の追加確認変数はありません
 
 ---
 

@@ -40,9 +40,9 @@ upstream tag
    |
    +-- integration/v<upstream>-frenzy.<n>   冲突处理、补丁重放、测试
            |
-           +-- release/<upstream>-frenzy.<n>  审批后的不可变发布源码
+           +-- release/<source8>-frenzy.<n>   审批后的不可变发布源码
                     |
-                    +-- frenzy/app/v<upstream>-frenzy.<n>
+                    +-- frenzy/app/v<upstream>-<source8>.<n>
 ```
 
 分支职责：

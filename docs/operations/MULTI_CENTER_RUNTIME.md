@@ -1,6 +1,10 @@
 # Multi-Center Runtime Contract
 
-截至 2026-08-01（Asia/Tokyo），本文件描述应用源码中的多 Center 运行契约。它不表示生产已经有第二台 Center，也不表示 RDS、Redis 或应用已经达到高可用。生产拓扑、slot 身份和切换证据只记录在私有运维仓库。
+截至 2026-08-03（Asia/Tokyo），本文件描述已发布
+`frenzy/app/v0.1.169-c68b4c8b.2` 源码中的多 Center 运行契约。私有部署证据已确认两个 slot
+的 stop-first 人工冷备切换路径完成双向演练；生产拓扑、slot 身份、artifact digest 和切换
+记录只保存在私有运维仓库。该事实不表示应用、PostgreSQL 或 Redis 已达到高可用，也不
+表示已开放 active-active 或自动故障切换。
 
 ## 进程角色
 
@@ -73,14 +77,15 @@ subscription maintenance/invalidation、usage-record pool，以及 upstream bill
 5. 核对新 fencing token、连续 `/readyz`、认证 synthetic、固定出口绑定和 usage/billing 写入，再注册 ALB。
 6. 任一检查失败时保持新 slot 隔离；只有旧 slot 的工件、配置和 schema 仍兼容时才恢复旧主。
 
-实际中断时间必须从 deregistration、最后旧请求完成、首次新请求成功和长连接断开记录计算。没有演练数据前不得宣称零中断。
+实际中断时间必须从 deregistration、最后旧请求完成、首次新请求成功和长连接断开记录
+计算。已有私有演练数据只能描述那次受控切换，不能外推成通用 SLO，更不能宣称零中断。
 
 ## 尚未开放
 
 - 自动故障切换和 active-active；
 - 所有关键写路径校验 fencing token；
 - 混合版本账号 credential 写入、cache snapshot 和 scheduler/outbox 的完整 N/N-1 证明；
-- Redis replica/automatic failover、RDS Multi-AZ、告警动作和恢复演练带来的基础设施 HA；
+- 应用源码无法证明的数据库/cache 副本、自动故障切换、告警动作和恢复演练等基础设施 HA；
 - 不可恢复的 SSE/WebSocket 跨实例续传。
 
 这些能力未完成时，第二个 Center 只是受控冷备，不是高可用声明。
