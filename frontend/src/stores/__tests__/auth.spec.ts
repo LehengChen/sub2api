@@ -360,6 +360,25 @@ describe('useAuthStore', () => {
       expect(JSON.parse(localStorage.getItem('auth_user')!)).toEqual(updatedUser)
     })
 
+    it('将后端返回的 standard 模式同步到当前 simple 会话', async () => {
+      mockLogin.mockResolvedValue({
+        ...fakeAuthResponse,
+        user: { ...fakeUser, run_mode: 'simple' as const },
+      })
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      expect(store.isSimpleMode).toBe(true)
+
+      mockGetCurrentUser.mockResolvedValue({
+        data: { ...fakeUser, run_mode: 'standard' as const },
+      })
+
+      await store.refreshUser()
+
+      expect(store.runMode).toBe('standard')
+      expect(store.isSimpleMode).toBe(false)
+    })
+
     it('未认证时抛出错误', async () => {
       const store = useAuthStore()
       await expect(store.refreshUser()).rejects.toThrow('Not authenticated')
