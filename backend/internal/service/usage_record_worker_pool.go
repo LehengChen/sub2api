@@ -171,7 +171,14 @@ func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMo
 	if p == nil || task == nil {
 		return UsageRecordSubmitModeDropped
 	}
-	if p.pool == nil || p.pool.Stopped() {
+	if p.pool == nil {
+		// 惰性池（standby/受 fencing 进程）：直接丢弃，不能触发 handler 的
+		// 停排窗口同步兜底执行。
+		p.droppedPoolStopped.Add(1)
+		p.logDrop("inert")
+		return UsageRecordSubmitModeDropped
+	}
+	if p.pool.Stopped() {
 		p.droppedPoolStopped.Add(1)
 		p.logDrop("stopped")
 		return UsageRecordSubmitModeDroppedStopped

@@ -806,11 +806,12 @@ func ProvideContentModerationService(
 	hashCache ContentModerationHashCache,
 	groupRepo GroupRepository,
 	userRepo UserRepository,
+	proxyRepo ProxyRepository,
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
 	fence *WorkerFence,
 ) *ContentModerationService {
-	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, shouldStartBackgroundWorkers(fence))
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, proxyRepo, authCacheInvalidator, emailService, shouldStartBackgroundWorkers(fence))
 }
 
 // ProvideAPIKeyService wires APIKeyService and connects rate-limit cache invalidation.

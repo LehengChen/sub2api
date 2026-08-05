@@ -50,7 +50,7 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 	subscription.DoWindowMaintenance(nil)
 	subscription.Stop()
 
-	moderation := ProvideContentModerationService(nil, nil, nil, nil, nil, nil, nil, fence)
+	moderation := ProvideContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil, fence)
 	require.True(t, moderation.workersDisabled)
 	moderation.enqueueAsync(ContentModerationCheckInput{}, nil, ContentModerationInput{}, "")
 	require.Zero(t, moderation.asyncEnqueued.Load())
