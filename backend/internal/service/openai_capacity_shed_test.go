@@ -2,11 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,20 +60,135 @@ func TestTempUnscheduleRetryableErrorSkipsRequestScopedTransient(t *testing.T) {
 	})
 }
 
-// 非池模式账号同样要先在同账号重试：换号不改变降载因素。
-func TestStreamFailedEventCapacityShedRetriesOnSameAccount(t *testing.T) {
-	nonPool := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+func TestStreamFailedEventCapacityShedSwitchesOpenAIOAuthAccount(t *testing.T) {
+	oauth := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	apiKey := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	grokOAuth := &Account{ID: 3, Platform: PlatformGrok, Type: AccountTypeOAuth}
 
 	for _, code := range []string{"server_is_overloaded", "slow_down"} {
 		payload := []byte(`{"type":"response.failed","response":{"error":{"code":"` + code + `"}}}`)
 		require.True(t, isOpenAIUpstreamCapacityShedEvent(payload), code)
-		require.True(t, openAIStreamFailedEventRetryableOnSameAccount(nonPool, payload, "overloaded"), code)
+		require.False(t, openAIStreamFailedEventRetryableOnSameAccount(oauth, payload, "overloaded"), code)
+		require.True(t, openAIStreamFailedEventRetryableOnSameAccount(apiKey, payload, "overloaded"), code)
+		require.True(t, openAIStreamFailedEventRetryableOnSameAccount(grokOAuth, payload, "overloaded"), code)
 	}
 
 	// 非降载的 failed 事件在非池模式下仍不做同账号重试，避免放大改动面。
 	other := []byte(`{"type":"response.failed","response":{"error":{"code":"server_error"}}}`)
 	require.False(t, isOpenAIUpstreamCapacityShedEvent(other))
-	require.False(t, openAIStreamFailedEventRetryableOnSameAccount(nonPool, other, "boom"))
+	require.False(t, openAIStreamFailedEventRetryableOnSameAccount(oauth, other, "boom"))
+}
+
+func TestOpenAINativeBareCapacityBeforeOutputFailsOver(t *testing.T) {
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+
+	timeouts := map[string]int{
+		"default without staging": 0,
+		"semantic staging":        30,
+	}
+	tests := map[string]string{
+		"event header without data type": "event: error\n" +
+			`data: {"error":{"code":"server_is_overloaded"}}` + "\n\n",
+		"event header without space": "event:error\n" +
+			`data: {"error":{"code":"slow_down"}}` + "\n\n",
+		"data type error": `data: {"type":"error","error":{"code":"slow_down"}}` + "\n\n",
+	}
+	for timeoutName, timeoutSeconds := range timeouts {
+		t.Run(timeoutName, func(t *testing.T) {
+			for name, body := range tests {
+				t.Run(name, func(t *testing.T) {
+					rec, written, err := runOpenAINativeCapacityStream(t, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, body, timeoutSeconds)
+
+					var failoverErr *UpstreamFailoverError
+					require.ErrorAs(t, err, &failoverErr)
+					require.False(t, failoverErr.RetryableOnSameAccount)
+					require.True(t, failoverErr.RequestScopedTransient)
+					require.False(t, written)
+					require.Empty(t, rec.Body.String())
+				})
+			}
+		})
+	}
+	require.True(t, logSink.ContainsMessageAtLevel("openai.responses.oauth_capacity_prewrite_failover", "warn"))
+	require.True(t, logSink.ContainsFieldValue("account_id", "1"))
+	require.True(t, logSink.ContainsFieldValue("capacity_code", "server_is_overloaded"))
+	require.True(t, logSink.ContainsFieldValue("capacity_code", "slow_down"))
+	require.True(t, logSink.ContainsFieldValue("upstream_request_id", "upstream-request-id"))
+}
+
+func TestOpenAINativeBareCapacityKeepsLegacyBoundaries(t *testing.T) {
+	capacity := "event: error\n" + `data: {"error":{"code":"server_is_overloaded"}}` + "\n\n"
+	nonCapacity := "event: error\n" + `data: {"error":{"code":"server_error"}}` + "\n\n"
+	tests := map[string]struct {
+		account *Account
+		body    string
+	}{
+		"OpenAI API key": {account: &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, body: capacity},
+		"Grok OAuth":     {account: &Account{ID: 2, Platform: PlatformGrok, Type: AccountTypeOAuth}, body: capacity},
+		"non capacity":   {account: &Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, body: nonCapacity},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec, _, err := runOpenAINativeCapacityStream(t, tt.account, tt.body, 30)
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "missing terminal event")
+			var failoverErr *UpstreamFailoverError
+			require.False(t, errors.As(err, &failoverErr))
+			require.Contains(t, rec.Body.String(), `"code"`)
+		})
+	}
+}
+
+func TestOpenAINativeBareCapacityAfterOutputDoesNotReplay(t *testing.T) {
+	body := `data: {"type":"response.output_text.delta","delta":"hello"}` + "\n\n" +
+		"event: error\n" + `data: {"error":{"code":"server_is_overloaded"}}` + "\n\n"
+	rec, _, err := runOpenAINativeCapacityStream(t, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, body, 30)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "missing terminal event")
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr))
+	require.Contains(t, rec.Body.String(), `"delta":"hello"`)
+	require.Contains(t, rec.Body.String(), `"code":"server_is_overloaded"`)
+}
+
+func TestOpenAINativeStagedStructuralEventsEOFKeepHEADMissingTerminal(t *testing.T) {
+	body := `data: {"type":"response.created","response":{"id":"resp_1"}}` + "\n\n" +
+		`data: {"type":"response.output_item.added","item":{"id":"item_1","type":"message","content":[]}}` + "\n\n"
+	rec, _, err := runOpenAINativeCapacityStream(t, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, body, 30)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "missing terminal event")
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr))
+	require.Contains(t, rec.Body.String(), `"type":"response.created"`)
+	require.Contains(t, rec.Body.String(), `"type":"response.output_item.added"`)
+}
+
+func runOpenAINativeCapacityStream(t *testing.T, account *Account, body string, firstOutputTimeoutSeconds int) (*httptest.ResponseRecorder, bool, error) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{Gateway: config.GatewayConfig{
+			OpenAIFirstOutputTimeoutSeconds: firstOutputTimeoutSeconds,
+		}},
+		toolCorrector: NewCodexToolCorrector(),
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+			"X-Request-Id": []string{"upstream-request-id"},
+		},
+		Body: io.NopCloser(strings.NewReader(body)),
+	}
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "gpt-5", "gpt-5")
+	return rec, c.Writer.Written(), err
 }
 
 // 出站身份的版本声明只能有一个来源：UA 的版本段、version 头、探针版本三处必须同源，

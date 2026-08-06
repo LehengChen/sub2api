@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"go.uber.org/zap"
 )
 
 // openaiStreamingResult streaming response result
@@ -219,6 +220,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	eventInProgress := false
 	eventStartsClientOutput := false
 	eventShouldFlush := false
+	currentSSEEventType := ""
 	handlePendingWriteError := func(err error) {
 		if firstOutputStage != nil && firstTokenMs == nil && !firstOutputStage.closed {
 			message := "OpenAI first-output staging failed"
@@ -401,11 +403,29 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if streamEarlyErr != nil {
 			return
 		}
+		if eventType, ok := extractOpenAISSEEventLine(line); ok {
+			currentSSEEventType = eventType
+		}
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			eventTypeRaw := gjson.GetBytes(dataBytes, "type").String()
 			eventType := strings.TrimSpace(eventTypeRaw)
+			capacityEventType := eventType
+			if capacityEventType == "" {
+				capacityEventType = currentSSEEventType
+			}
+			if isOpenAIOAuthAccount(account) && capacityEventType == "error" && isOpenAIUpstreamCapacityShedEvent(dataBytes) {
+				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+					logger.FromContext(ctx).With(
+						zap.Int64("account_id", account.ID),
+						zap.String("capacity_code", openAIStreamFailedEventErrorCode(dataBytes)),
+						zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
+					).Warn("openai.responses.oauth_capacity_prewrite_failover")
+					streamEarlyErr = s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
+					return
+				}
+			}
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventTypeRaw) {
 				sawTerminalEvent = true
@@ -549,6 +569,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 
 		// A blank line dispatches a guarded event from the attempt-local stage.
 		if guardFirstOutput && line == "" {
+			currentSSEEventType = ""
 			if !clientDisconnected {
 				if _, err := writePendingString("\n"); err != nil {
 					handlePendingWriteError(err)
@@ -563,6 +584,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		// or queue-drain flush must never split an open SSE event.
 		shouldFlush := false
 		if line == "" {
+			currentSSEEventType = ""
 			shouldFlush = eventShouldFlush || (queueDrained && clientOutputStarted)
 			eventShouldFlush = false
 		}
