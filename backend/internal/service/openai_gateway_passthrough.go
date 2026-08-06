@@ -255,7 +255,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		imageCount = result.imageCount
 		imageOutputSizes = result.imageOutputSizes
 	} else {
-		result, err := s.handleNonStreamingResponsePassthrough(ctx, resp, c, reqModel, upstreamPassthroughModel)
+		result, err := s.handleNonStreamingResponsePassthrough(ctx, resp, c, account, reqModel, upstreamPassthroughModel)
 		if err != nil {
 			return nil, err
 		}
@@ -1047,6 +1047,49 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 	return message
 }
 
+// nonStreamingFailedEventFailover 判定 stream=false 场景下、承载于 HTTP 200 SSE 的
+// response.failed 终止事件应当切号，还是直接把错误回写给客户端。
+//
+// 同一个上游 capacity/限流错误此前在两条路径上行为不一致：流式路径经
+// openAIStreamFailedEventShouldFailover 判定后返回 UpstreamFailoverError 切号；
+// 而 stream=false 的 SSE→JSON 转换路径直接 writeOpenAINonStreamingProtocolError
+// 回写 502，池内还有可调度账号也不会切，并把上游原始文案暴露给最终用户。
+//
+// 这条路径上的响应体已被 ReadUpstreamResponseBody 完整缓冲，判定发生在任何
+// 语义响应写出之前，因此重放是安全的。与流式路径一致，本函数只拒绝已经写过
+// 语义响应的场景（IsResponseCommitted）；能否真正换号由 handler 仲裁——它用
+// OpenAICompactKeepaliveAdjustedWrittenSize 扣除 compact 心跳注释字节后，
+// 再判断 Forward 期间是否已写出响应（#3887）。
+//
+// 返回 nil 表示不切号，调用方继续走原有的错误回写逻辑。
+func (s *OpenAIGatewayService) nonStreamingFailedEventFailover(
+	c *gin.Context,
+	account *Account,
+	passthrough bool,
+	resp *http.Response,
+	payload []byte,
+	message string,
+) *UpstreamFailoverError {
+	if account == nil || resp == nil || c == nil {
+		return nil
+	}
+	if IsResponseCommitted(c) {
+		return nil
+	}
+	if !openAIStreamFailedEventShouldFailover(payload, message) {
+		return nil
+	}
+	return s.newOpenAIStreamFailoverError(
+		c,
+		account,
+		passthrough,
+		resp.Header.Get("x-request-id"),
+		payload,
+		message,
+		resp.Header,
+	)
+}
+
 func (s *OpenAIGatewayService) newOpenAIStreamFailoverError(
 	c *gin.Context,
 	account *Account,
@@ -1362,6 +1405,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	ctx context.Context,
 	resp *http.Response,
 	c *gin.Context,
+	account *Account,
 	originalModel string,
 	mappedModel string,
 ) (*openaiNonStreamingResultPassthrough, error) {
@@ -1384,7 +1428,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	// stream=false was requested. Without this conversion the client would
 	// receive raw SSE text or a terminal event with empty output.
 	if isEventStreamResponse(resp.Header) {
-		return s.handlePassthroughSSEToJSON(resp, c, body, originalModel, mappedModel)
+		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
 	}
 
 	usage := &OpenAIUsage{}
@@ -1429,7 +1473,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // response for the passthrough path. It mirrors handleSSEToJSON while
 // preserving passthrough payloads, except compact-only model remapping may
 // rewrite model fields back to the original requested model.
-func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
+func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
 	bodyText := string(body)
 	finalResponse, ok := extractCodexFinalResponse(bodyText)
 
@@ -1465,6 +1509,10 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 			msg := extractOpenAISSEErrorMessage(terminalPayload)
 			if msg == "" {
 				msg = "Upstream compact response failed"
+			}
+			// 与流式 passthrough 路径采用同一套判定，见 nonStreamingFailedEventFailover。
+			if failoverErr := s.nonStreamingFailedEventFailover(c, account, true, resp, terminalPayload, msg); failoverErr != nil {
+				return nil, failoverErr
 			}
 			return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 		}
