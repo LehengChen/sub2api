@@ -33,6 +33,30 @@ commit 和可重复计算的 stable patch-id。
 - `8ef96178887753cfecb925addc6ab10d661af3fb` / `dc5a4ba48482be28e8348e530db37e16fd051397`：Wire/Ent 生成输出和回滚 API timeout 测试同步；生成器重跑已通过。
 - `backend/cmd/server/VERSION` 从 upstream tag 内的 `0.1.168` 规范化为 `0.1.169`，避免控制台把正式 v0.1.169 误报为旧版本；该变更必须随候选源码 SHA 一起审查。
 
+## v0.1.171 增量处置（2026-08-06，Asia/Tokyo）
+
+### FZ-010：OpenAI OAuth capacity pre-write failover
+
+```yaml
+id: FZ-010
+order: 100
+status: reimplement
+original_commit: 9ecd2604dc8cebccdd28cf7014f396320d4037a6
+applied_commit: 9ecd2604dc8cebccdd28cf7014f396320d4037a6
+stable_patch_id: 04a01a8619d9da9440752f35a393d4839dd1b990
+last_reviewed_against: f0e7a9c7a23a7d02fb159b62fa809621eb0475a6
+upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/5281
+```
+
+- Intent：OpenAI OAuth 的 native HTTP Responses 流在客户端输出开始前收到精确的 `server_is_overloaded` / `slow_down` 时，结束当前尝试并交给既有 failover 调度切换账号；`event: error` 且 data 内无 `type` 的形态同样识别。
+- Invariant：OAuth capacity 不做同账号重试；只有尚未开始客户端输出时允许重放。API key、Grok、普通非 capacity、已开始输出和仅结构事件后 EOF 均保持 upstream v0.1.171 行为。
+- Why configuration is insufficient：现有平台配置不能改变 HTTP 200 后 SSE 事件的协议分类，也不能在已选账号的单次流内触发 request-scoped failover。
+- Paths：`backend/internal/service/openai_gateway_passthrough.go`、`backend/internal/service/openai_gateway_response_handling.go`、`backend/internal/service/openai_capacity_shed_test.go`。
+- Tests：`TestStreamFailedEventCapacityShedSwitchesOpenAIOAuthAccount`、`TestOpenAINativeBareCapacityBeforeOutputFailsOver`、`TestOpenAINativeBareCapacityKeepsLegacyBoundaries`、`TestOpenAINativeBareCapacityAfterOutputDoesNotReplay`、`TestOpenAINativeStagedStructuralEventsEOFKeepHEADMissingTerminal`，以及 service 定向 `-race`。
+- Dependencies：无新运行依赖；复用既有 `UpstreamFailoverError`、失败账号排除和 EWMA 调度路径。
+- Evidence boundary：运行态账号均为 OpenAI OAuth native HTTP 路径，最近 30 天 OpenAI 错误记录以流式 `/v1/responses` 为主，但现有日志未检索到上述 capacity code；不得声称覆盖 message-only、非流式或所有 #5281 形态。
+- Drop condition：upstream 提供等价的 OAuth pre-write capacity 分类、切号与上述兼容边界，并通过相同回归后删除本地实现。
+
 ## 已部署基线
 
 观察日期：2026-07-13
