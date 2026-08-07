@@ -57,6 +57,32 @@ upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/5281
 - Evidence boundary：运行态账号均为 OpenAI OAuth native HTTP 路径，最近 30 天 OpenAI 错误记录以流式 `/v1/responses` 为主，但现有日志未检索到上述 capacity code；不得声称覆盖 message-only、非流式或所有 #5281 形态。
 - Drop condition：upstream 提供等价的 OAuth pre-write capacity 分类、切号与上述兼容边界，并通过相同回归后删除本地实现。
 
+### FZ-011：OpenAI OAuth non-streaming `response.failed` failover（PR #5326）
+
+```yaml
+id: FZ-011
+order: 110
+status: reimplement
+original_commit: 5e8acfebec71ac9ae6558787b3d4f563d1913fb2
+applied_commits:
+  - 70ff34e6b63b9ff88cf69044ebb76c84139ed991
+  - 7468c51f60111fdbf1822e8dbefef07ea2d4daa5
+upstream_stable_patch_id: 382e95eb4d1abefe9a23814df687523a4e568c3f
+scope_fix_stable_patch_id: 00b4dc259198fa7aedeacfc5c91b2a5e5627541a
+last_reviewed_against: 5e8acfebec71ac9ae6558787b3d4f563d1913fb2
+upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/pull/5326
+```
+
+- Intent：修复 `stream=false` 但上游以 HTTP 200 SSE `response.failed` 终止的 OpenAI OAuth native 与 passthrough 转换路径，使尚未向客户端提交语义响应的 capacity/既有 transient 事件进入已有 `UpstreamFailoverError` 调度，而不是固定写回 502。
+- Invariant：非流式新入口仅对 `PlatformOpenAI + OAuth` 生效；OpenAI API key、Grok、普通未分类 `response.failed`、已提交响应和结构事件后 EOF 维持 HEAD 行为。实际切号仍由 handler 的既有排除集合与调度仲裁，不能把 service 测试描述成已证明 A→B 真实请求。
+- Scope correction：上游 PR 默认把未分类 `response.failed` 也切号；本候选用 `7468c51f6` 限定账号类型、要求正向 transient 分类并恢复未分类错误的 HEAD 协议错误测试，避免扩大 OAuth/API-key/Grok 行为。
+- Why configuration is insufficient：平台错误透传规则不能改变 HTTP 200 SSE 终止事件在非流式转换器中的分类，也不能在响应提交前把当前 OAuth 账号交给 request-scoped failover。
+- Paths：`backend/internal/service/openai_gateway_passthrough.go`、`backend/internal/service/openai_gateway_response_handling.go`、`backend/internal/service/openai_gateway_service_test.go`、`backend/internal/service/openai_non_streaming_failed_event_failover_test.go`、`backend/internal/service/openai_compact_stream_bridge_test.go`、`backend/internal/service/openai_oauth_passthrough_test.go`。
+- Tests：PR 的 native/passthrough capacity、invalid request、context-window、committed-response、guard 回归；`TestNonStreamingFailedEventFailoverKeepsNonOAuthHEAD`；`TestHandleSSEToJSON_ResponseFailedUnclassifiedKeepsHEADProtocolError`；FZ-010 native bare capacity/结构 EOF 兼容套件和 service `-race`；完整 service unit、integration、编译和 golangci-lint 2.9.0。
+- Dependencies：无新增运行依赖；复用 upstream 既有 transient/status 分类器、`UpstreamFailoverError`、账号排除与 EWMA 调度，并与 FZ-010 的 OAuth streaming 兼容边界共同回归。
+- Evidence boundary：当前测试证明的是 service 转换器在响应提交前返回 failover error；没有真实 OAuth 上游、管理员配置透传规则优先级、跨 handler 多账号 A→B 或所有 #5281 envelope 的端到端证据。候选仍不得描述为“已完全解决 issue #5281”。
+- Drop condition：upstream 提供等价的 OAuth non-streaming capacity 分类、切号和 HEAD 兼容边界，并通过同一组回归后，未来 integration 不再重放这两个 patch unit，标记 `drop-upstreamed` 并重新计算 patch queue。
+
 ## 已部署基线
 
 观察日期：2026-07-13
