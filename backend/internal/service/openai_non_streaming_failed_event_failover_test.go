@@ -60,7 +60,7 @@ func TestNonStreamingSSEToJSONCapacityFailedReturnsFailover(t *testing.T) {
 		context.Background(),
 		newCapacityFailedSSEResponse(),
 		c,
-		&Account{ID: 7, Type: AccountTypeOAuth},
+		&Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
 		"gpt-5.5",
 		"gpt-5.5",
 	)
@@ -82,7 +82,7 @@ func TestNonStreamingPassthroughSSEToJSONCapacityFailedReturnsFailover(t *testin
 		context.Background(),
 		newCapacityFailedSSEResponse(),
 		c,
-		&Account{ID: 7, Type: AccountTypeOAuth},
+		&Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
 		"gpt-5.5",
 		"gpt-5.5",
 	)
@@ -110,7 +110,7 @@ func TestNonStreamingSSEToJSONInvalidRequestFailedStillWritesError(t *testing.T)
 
 	_, err := svc.handleNonStreamingResponse(
 		context.Background(), resp, c,
-		&Account{ID: 7, Type: AccountTypeOAuth}, "gpt-5.5", "gpt-5.5",
+		&Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, "gpt-5.5", "gpt-5.5",
 	)
 
 	require.Error(t, err)
@@ -137,7 +137,7 @@ func TestNonStreamingSSEToJSONContextWindowFailedStillWritesError(t *testing.T) 
 
 	_, err := svc.handleNonStreamingResponse(
 		context.Background(), resp, c,
-		&Account{ID: 7, Type: AccountTypeOAuth}, "gpt-5.5", "gpt-5.5",
+		&Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, "gpt-5.5", "gpt-5.5",
 	)
 
 	require.Error(t, err)
@@ -157,7 +157,7 @@ func TestNonStreamingSSEToJSONSkipsFailoverAfterResponseCommitted(t *testing.T) 
 		context.Background(),
 		newCapacityFailedSSEResponse(),
 		c,
-		&Account{ID: 7, Type: AccountTypeOAuth},
+		&Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
 		"gpt-5.5",
 		"gpt-5.5",
 	)
@@ -167,6 +167,32 @@ func TestNonStreamingSSEToJSONSkipsFailoverAfterResponseCommitted(t *testing.T) 
 	require.False(t, errors.As(err, &failoverErr),
 		"响应已提交后必须沿用原有错误回写路径，不得切号")
 	require.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+func TestNonStreamingFailedEventFailoverKeepsNonOAuthHEAD(t *testing.T) {
+	for name, account := range map[string]*Account{
+		"OpenAI API key": {ID: 8, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		"Grok OAuth":     {ID: 9, Platform: PlatformGrok, Type: AccountTypeOAuth},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := newNonStreamingFailoverTestService()
+			c, rec := newNonStreamingFailoverTestContext()
+
+			_, err := svc.handleNonStreamingResponse(
+				context.Background(),
+				newCapacityFailedSSEResponse(),
+				c,
+				account,
+				"gpt-5.5",
+				"gpt-5.5",
+			)
+
+			var failoverErr *UpstreamFailoverError
+			require.Error(t, err)
+			require.False(t, errors.As(err, &failoverErr))
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+		})
+	}
 }
 
 // 判定函数本身的边界：account/resp 缺失或响应已写出时一律不切号。
@@ -193,11 +219,11 @@ func TestNonStreamingFailedEventFailoverGuards(t *testing.T) {
 	t.Run("response_committed", func(t *testing.T) {
 		c, _ := newNonStreamingFailoverTestContext()
 		MarkResponseCommitted(c)
-		require.Nil(t, svc.nonStreamingFailedEventFailover(c, &Account{ID: 1}, false, resp, payload, msg))
+		require.Nil(t, svc.nonStreamingFailedEventFailover(c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, false, resp, payload, msg))
 	})
 
 	t.Run("clean_context_failovers", func(t *testing.T) {
 		c, _ := newNonStreamingFailoverTestContext()
-		require.NotNil(t, svc.nonStreamingFailedEventFailover(c, &Account{ID: 1}, false, resp, payload, msg))
+		require.NotNil(t, svc.nonStreamingFailedEventFailover(c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, false, resp, payload, msg))
 	})
 }

@@ -1073,10 +1073,19 @@ func (s *OpenAIGatewayService) nonStreamingFailedEventFailover(
 	if account == nil || resp == nil || c == nil {
 		return nil
 	}
+	// Keep the new non-streaming failover behavior scoped to OpenAI OAuth.
+	// API-key and other platform handlers retain their HEAD behavior.
+	if !isOpenAIOAuthAccount(account) {
+		return nil
+	}
 	if IsResponseCommitted(c) {
 		return nil
 	}
-	if !openAIStreamFailedEventShouldFailover(payload, message) {
+	// Unlike the streaming classifier, the legacy non-streaming path did not
+	// fail over unknown response.failed events. Require a positive transient
+	// classification so this extension does not broaden that behavior.
+	if openAIStreamFailureStatus(payload, message) != http.StatusTooManyRequests &&
+		!isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return nil
 	}
 	return s.newOpenAIStreamFailoverError(

@@ -3534,12 +3534,9 @@ func TestHandleSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `data: {"type":"response.in_progress"`)
 }
 
-// 未被分类为不可重试的 response.failed 走与流式路径相同的判定
-// （openAIStreamFailedEventShouldFailover 对未知错误默认倾向切号），
-// 因此这里返回 UpstreamFailoverError 而不是直接回写 502。
-// 明确不可重试的错误仍然回写协议错误，见
-// TestNonStreamingSSEToJSONInvalidRequestFailedStillWritesError。
-func TestHandleSSEToJSON_ResponseFailedUnclassifiedReturnsFailover(t *testing.T) {
+// 未分类的 response.failed 保持 HEAD 的协议错误行为；非流式入口只把
+// OpenAI OAuth 账号交给既有流式错误分类器，其他账号不改变行为。
+func TestHandleSSEToJSON_ResponseFailedUnclassifiedKeepsHEADProtocolError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -3555,12 +3552,14 @@ func TestHandleSSEToJSON_ResponseFailedUnclassifiedReturnsFailover(t *testing.T)
 		`data: [DONE]`,
 	}, "\n"))
 
-	usage, err := svc.handleSSEToJSON(resp, c, &Account{ID: 1, Type: AccountTypeOAuth}, body, "gpt-4o", "gpt-4o")
+	usage, err := svc.handleSSEToJSON(resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, body, "gpt-4o", "gpt-4o")
 	require.Nil(t, usage)
 
 	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr)
-	require.Empty(t, rec.Body.String(), "切号前不得向下游写入任何字节")
+	require.Error(t, err)
+	require.False(t, errors.As(err, &failoverErr))
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Body.String(), "upstream_error")
 }
 
 func TestOpenAICompatSSEFrameParserResetsEventTypeAtFrameBoundary(t *testing.T) {
