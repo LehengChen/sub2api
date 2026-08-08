@@ -24,8 +24,14 @@ type BuildInfo struct {
 }
 
 // ProvidePricingService creates and initializes PricingService
-func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient) (*PricingService, error) {
-	svc := NewPricingService(cfg, remoteClient)
+func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient, fence *WorkerFence) (*PricingService, error) {
+	runtimeCfg := cfg
+	if !shouldStartBackgroundWorkers(fence) {
+		cfgCopy := *cfg
+		cfgCopy.Pricing.RemoteUpdatesEnabled = false
+		runtimeCfg = &cfgCopy
+	}
+	svc := NewPricingService(runtimeCfg, remoteClient)
 	if err := svc.Initialize(); err != nil {
 		// Pricing service initialization failure should not block startup, use fallback prices
 		println("[Service] Warning: Pricing service initialization failed:", err.Error())
@@ -807,11 +813,12 @@ func ProvideContentModerationService(
 	hashCache ContentModerationHashCache,
 	groupRepo GroupRepository,
 	userRepo UserRepository,
+	proxyRepo ProxyRepository,
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
 	fence *WorkerFence,
 ) *ContentModerationService {
-	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, shouldStartBackgroundWorkers(fence))
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, proxyRepo, authCacheInvalidator, emailService, shouldStartBackgroundWorkers(fence))
 }
 
 // ProvideAPIKeyService wires APIKeyService and connects rate-limit cache invalidation.
