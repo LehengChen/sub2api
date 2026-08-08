@@ -787,6 +787,58 @@ func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
 	}
 }
 
+const openAIUpstreamOverloadMessage = "Our servers are currently overloaded. Please try again later."
+
+func isOpenAIUpstreamCapacityMessage(message string) bool {
+	trimmed := strings.TrimSpace(message)
+	return strings.Contains(strings.ToLower(trimmed), "selected model is at capacity") ||
+		strings.EqualFold(trimmed, openAIUpstreamOverloadMessage)
+}
+
+func isOpenAIOAuthCapacityShedEvent(account *Account, payload []byte, message string) bool {
+	if !isOpenAIOAuthAccount(account) {
+		return false
+	}
+	if isOpenAIUpstreamCapacityShedEvent(payload) {
+		return true
+	}
+	if isOpenAIUpstreamCapacityMessage(message) {
+		return true
+	}
+	return isOpenAIUpstreamCapacityMessage(extractOpenAISSEErrorMessage(payload))
+}
+
+func logOpenAIOAuthCapacityDecision(
+	ctx context.Context,
+	account *Account,
+	payload []byte,
+	eventType string,
+	passthrough bool,
+	upstreamRequestID string,
+	clientOutputStarted bool,
+) {
+	decision := "failover"
+	logMessage := "openai.responses.oauth_capacity_prewrite_failover"
+	if clientOutputStarted {
+		decision = "passthrough_after_output"
+		logMessage = "openai.responses.oauth_capacity_postwrite_passthrough"
+	}
+	capacityMatch := "message"
+	if isOpenAIUpstreamCapacityShedEvent(payload) {
+		capacityMatch = "code"
+	}
+	logger.FromContext(ctx).With(
+		zap.Int64("account_id", account.ID),
+		zap.String("event_type", strings.TrimSpace(eventType)),
+		zap.String("capacity_code", truncateOpenAIWSLogValue(openAIStreamFailedEventErrorCode(payload), 120)),
+		zap.String("capacity_match", capacityMatch),
+		zap.Bool("client_output_started", clientOutputStarted),
+		zap.String("decision", decision),
+		zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
+		zap.Bool("passthrough", passthrough),
+	).Warn(logMessage)
+}
+
 func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
 	if isOpenAIContextWindowError(message, payload) {
 		return http.StatusBadRequest
@@ -1036,6 +1088,17 @@ func (s *OpenAIGatewayService) nonStreamingFailedEventFailover(
 	// Unlike the streaming classifier, the legacy non-streaming path did not
 	// fail over unknown response.failed events. Require a positive transient
 	// classification so this extension does not broaden that behavior.
+	if isOpenAIOAuthCapacityShedEvent(account, payload, message) {
+		return s.newOpenAIOAuthCapacityFailoverError(
+			c,
+			account,
+			passthrough,
+			resp.Header.Get("x-request-id"),
+			payload,
+			message,
+			resp.Header,
+		)
+	}
 	if openAIStreamFailureStatus(payload, message) != http.StatusTooManyRequests &&
 		!isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return nil
@@ -1049,6 +1112,29 @@ func (s *OpenAIGatewayService) nonStreamingFailedEventFailover(
 		message,
 		resp.Header,
 	)
+}
+
+func (s *OpenAIGatewayService) newOpenAIOAuthCapacityFailoverError(
+	c *gin.Context,
+	account *Account,
+	passthrough bool,
+	upstreamRequestID string,
+	payload []byte,
+	message string,
+	responseHeaders ...http.Header,
+) *UpstreamFailoverError {
+	failoverErr := s.newOpenAIStreamFailoverError(
+		c,
+		account,
+		passthrough,
+		upstreamRequestID,
+		payload,
+		message,
+		responseHeaders...,
+	)
+	failoverErr.RetryableOnSameAccount = false
+	failoverErr.RequestScopedTransient = true
+	return failoverErr
 }
 
 func (s *OpenAIGatewayService) newOpenAIStreamFailoverError(
@@ -1224,16 +1310,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if capacityEventType == "" {
 				capacityEventType = currentSSEEventType
 			}
-			if isOpenAIOAuthAccount(account) && capacityEventType == "error" && isOpenAIUpstreamCapacityShedEvent(dataBytes) &&
-				!openAIStreamClientOutputStarted(c, clientOutputStarted) {
-				logger.FromContext(ctx).With(
-					zap.Int64("account_id", account.ID),
-					zap.String("capacity_code", openAIStreamFailedEventErrorCode(dataBytes)),
-					zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
-					zap.Bool("passthrough", true),
-				).Warn("openai.responses.oauth_capacity_prewrite_failover")
-				return resultWithUsage(),
-					s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
+			if capacityEventType == "error" && isOpenAIOAuthCapacityShedEvent(account, dataBytes, extractOpenAISSEErrorMessage(dataBytes)) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, capacityEventType, true, upstreamRequestID, outputStarted)
+				if !outputStarted {
+					return resultWithUsage(),
+						s.newOpenAIOAuthCapacityFailoverError(c, account, true, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
+				}
 			}
 			if eventType == "response.failed" {
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
@@ -1251,7 +1334,15 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				if isOpenAIOAuthCapacityShedEvent(account, dataBytes, failedMessage) {
+					logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, eventType, true, upstreamRequestID, outputStarted)
+					if !outputStarted {
+						return resultWithUsage(),
+							s.newOpenAIOAuthCapacityFailoverError(c, account, true, upstreamRequestID, dataBytes, failedMessage, resp.Header)
+					}
+				}
+				if !outputStarted {
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
 						// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
 						// antigravity 先例），否则透传命中的 failed 在监控中不可见。

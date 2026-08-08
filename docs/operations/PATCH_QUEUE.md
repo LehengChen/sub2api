@@ -9,9 +9,9 @@ as local patches during the next sync.
 - Upstream tag: `v0.1.172`
 - Upstream peeled commit: `155c494964c3ea6ecc31f52679525c1034bf0f16`
 - Upstream capacity recovery: `8f7b0a314de816daabb5b761db3025cb10c3eca9` (PR #5398)
-- Candidate status: source integration only; not deployed and not attached to
-  production traffic. Final build, standby rehearsal, and artifact identity are
-  recorded separately after they complete.
+- Baseline status: v0.1.172 has been deployed. Running artifact identity and
+  production evidence remain in the private ops repository; each later local
+  patch must be built and staged as a new immutable candidate.
 - `backend/cmd/server/VERSION` is normalized from the tag's stale `0.1.171` to
   `0.1.172`; release builds should still inject the immutable candidate version.
 - FZ-010 is carried as a local reimplementation because the upstream capacity
@@ -289,3 +289,27 @@ status: reimplement
   receive the SPA document instead of the JSON health routes.
 - This two-line compatibility fix is required for the existing readiness and
   ALB contracts. It has no effect on API routing or capacity classification.
+
+## FZ-013: OpenAI OAuth overload-message capacity failover
+
+```yaml
+id: FZ-013
+order: 120
+status: reimplement
+last_reviewed_against: 155c494964c3ea6ecc31f52679525c1034bf0f16
+upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/5281
+```
+
+- Intent: recognize the exact observed upstream message `Our servers are
+  currently overloaded. Please try again later.` as an OpenAI OAuth capacity
+  signal before semantic output, then exclude the current account and switch.
+- Scope: HTTP Responses SSE in native, passthrough, and the existing
+  `stream=false` SSE conversion path. Structured capacity codes and the known
+  `Selected model is at capacity` message share the same OAuth-only decision.
+- Compatibility invariant: API-key, Grok, non-capacity errors, ordinary HTTP
+  JSON, WebSocket responses, post-output replay, and structural EOF behavior
+  remain unchanged. The new production message uses a trimmed, case-insensitive
+  full-sentence match rather than a generic `overloaded` keyword.
+- Evidence boundary: decision logs distinguish pre-output failover from
+  post-output passthrough without recording the raw upstream body. Unit, race,
+  EOF, and full service tests do not claim a live upstream A-to-B replay.

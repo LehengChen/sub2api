@@ -19,7 +19,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	"go.uber.org/zap"
 )
 
 // openaiStreamingResult streaming response result
@@ -420,15 +419,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if capacityEventType == "" {
 				capacityEventType = currentSSEEventType
 			}
-			if isOpenAIOAuthAccount(account) && capacityEventType == "error" && isOpenAIUpstreamCapacityShedEvent(dataBytes) {
-				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
-					logger.FromContext(ctx).With(
-						zap.Int64("account_id", account.ID),
-						zap.String("capacity_code", openAIStreamFailedEventErrorCode(dataBytes)),
-						zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
-						zap.Bool("passthrough", false),
-					).Warn("openai.responses.oauth_capacity_prewrite_failover")
-					streamEarlyErr = s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
+			if capacityEventType == "error" && isOpenAIOAuthCapacityShedEvent(account, dataBytes, extractOpenAISSEErrorMessage(dataBytes)) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, capacityEventType, false, upstreamRequestID, outputStarted)
+				if !outputStarted {
+					streamEarlyErr = s.newOpenAIOAuthCapacityFailoverError(c, account, false, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
 					return
 				}
 			}
@@ -456,7 +451,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				if isOpenAIOAuthCapacityShedEvent(account, dataBytes, failedMessage) {
+					logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, eventType, false, upstreamRequestID, outputStarted)
+					if !outputStarted {
+						sawFailedEvent = true
+						streamEarlyErr = s.newOpenAIOAuthCapacityFailoverError(c, account, false, upstreamRequestID, dataBytes, failedMessage, resp.Header)
+						return
+					}
+				}
+				if !outputStarted {
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
 						sawFailedEvent = true
 						// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与

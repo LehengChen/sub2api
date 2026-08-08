@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -80,6 +81,133 @@ func TestStreamFailedEventCapacityShedSwitchesOpenAIOAuthAccount(t *testing.T) {
 	require.False(t, openAIStreamFailedEventRetryableOnSameAccount(oauth, other, "boom"))
 }
 
+func TestOpenAIOAuthCapacityShedEventRecognizesOnlyKnownSignals(t *testing.T) {
+	oauth := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	apiKey := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	grokOAuth := &Account{ID: 3, Platform: PlatformGrok, Type: AccountTypeOAuth}
+
+	tests := map[string]struct {
+		payload []byte
+		message string
+	}{
+		"structured code": {
+			payload: []byte(`{"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}`),
+		},
+		"issue capacity message": {
+			payload: []byte(`{"type":"response.failed","error":{"type":"invalid_request_error"}}`),
+			message: "Selected model is at capacity. Please try a different model.",
+		},
+		"observed overload message": {
+			payload: []byte(`{"type":"response.failed","error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}`),
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, isOpenAIOAuthCapacityShedEvent(oauth, tt.payload, tt.message))
+			require.False(t, isOpenAIOAuthCapacityShedEvent(apiKey, tt.payload, tt.message))
+			require.False(t, isOpenAIOAuthCapacityShedEvent(grokOAuth, tt.payload, tt.message))
+		})
+	}
+
+	nonCapacity := []byte(`{"type":"response.failed","error":{"type":"invalid_request_error","message":"The service rejected this invalid request."}}`)
+	require.False(t, isOpenAIOAuthCapacityShedEvent(oauth, nonCapacity, ""))
+	require.False(t, isOpenAIOAuthCapacityShedEvent(oauth, nil, "Our servers are currently overloaded for maintenance. Please try again later."))
+	require.False(t, isOpenAITransientProcessingError(http.StatusBadRequest, openAIUpstreamOverloadMessage, nil),
+		"the production phrase must stay out of the cross-platform transient classifier")
+}
+
+func TestOpenAIOAuthOverloadResponseFailedBoundaries(t *testing.T) {
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+
+	preOutput := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_1"}}`,
+		"",
+		"event: response.failed",
+		`data: {"type":"response.failed","error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}`,
+		"",
+	}, "\n")
+	postStructuralOutput := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_1"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","item":{"id":"item_1","type":"message","content":[]}}`,
+		"",
+		"event: response.failed",
+		`data: {"type":"response.failed","error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}`,
+		"",
+	}, "\n")
+
+	runners := map[string]func(*Account, string) (*httptest.ResponseRecorder, error){
+		"native": func(account *Account, body string) (*httptest.ResponseRecorder, error) {
+			rec, _, err := runOpenAINativeCapacityStream(t, account, body, 30)
+			return rec, err
+		},
+		"passthrough": func(account *Account, body string) (*httptest.ResponseRecorder, error) {
+			return runOpenAIPassthroughCapacityStream(t, account, body)
+		},
+	}
+	for name, run := range runners {
+		t.Run(name+" OAuth pre-output", func(t *testing.T) {
+			rec, err := run(&Account{ID: 10, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, preOutput)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.False(t, failoverErr.RetryableOnSameAccount)
+			require.True(t, failoverErr.RequestScopedTransient)
+			require.Empty(t, rec.Body.String())
+		})
+
+		t.Run(name+" post-structural-output does not replay", func(t *testing.T) {
+			rec, err := run(&Account{ID: 13, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, postStructuralOutput)
+			var failoverErr *UpstreamFailoverError
+			require.Error(t, err)
+			require.False(t, errors.As(err, &failoverErr))
+			require.Contains(t, rec.Body.String(), `"type":"response.output_item.added"`)
+			require.Contains(t, rec.Body.String(), openAIUpstreamOverloadMessage)
+		})
+	}
+
+	require.True(t, logSink.ContainsMessageAtLevel("openai.responses.oauth_capacity_prewrite_failover", "warn"))
+	require.True(t, logSink.ContainsMessageAtLevel("openai.responses.oauth_capacity_postwrite_passthrough", "warn"))
+	require.True(t, logSink.ContainsFieldValue("event_type", "response.failed"))
+	require.True(t, logSink.ContainsFieldValue("capacity_match", "message"))
+	require.True(t, logSink.ContainsFieldValue("decision", "failover"))
+	require.True(t, logSink.ContainsFieldValue("decision", "passthrough_after_output"))
+}
+
+func TestOpenAIOAuthOverloadResponseFailedPrecedesPassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rule := newNonFailoverPassthroughRule(http.StatusBadRequest, "currently overloaded", http.StatusTeapot, "mapped error")
+	rule.Platforms = []string{PlatformOpenAI}
+	ruleSvc := &ErrorPassthroughService{}
+	ruleSvc.setLocalCache([]*model.ErrorPassthroughRule{rule})
+	BindErrorPassthroughService(c, ruleSvc)
+
+	body := strings.Join([]string{
+		"event: response.failed",
+		`data: {"type":"response.failed","error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}`,
+		"",
+	}, "\n")
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"X-Request-Id": []string{"rid-overload-rule"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c,
+		&Account{ID: 14, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, time.Now(), "gpt-5", "gpt-5")
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.False(t, IsResponseCommitted(c))
+	require.Empty(t, rec.Body.String())
+}
+
 func TestOpenAINativeBareCapacityBeforeOutputFailsOver(t *testing.T) {
 	logSink, restore := captureStructuredLog(t)
 	defer restore()
@@ -94,6 +222,8 @@ func TestOpenAINativeBareCapacityBeforeOutputFailsOver(t *testing.T) {
 		"event header without space": "event:error\n" +
 			`data: {"error":{"code":"slow_down"}}` + "\n\n",
 		"data type error": `data: {"type":"error","error":{"code":"slow_down"}}` + "\n\n",
+		"message-only overload": "event:error\n" +
+			`data: {"error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}` + "\n\n",
 	}
 	for timeoutName, timeoutSeconds := range timeouts {
 		t.Run(timeoutName, func(t *testing.T) {
@@ -123,6 +253,8 @@ func TestOpenAIPassthroughBareCapacityBeforeOutputFailsOver(t *testing.T) {
 		"event header without data type": "event:error\n" +
 			`data: {"error":{"code":"server_is_overloaded"}}` + "\n\n",
 		"data type error": `data: {"type":"error","error":{"code":"slow_down"}}` + "\n\n",
+		"message-only overload": "event:error\n" +
+			`data: {"error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}` + "\n\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec, err := runOpenAIPassthroughCapacityStream(t, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, body)

@@ -226,4 +226,20 @@ func TestNonStreamingFailedEventFailoverGuards(t *testing.T) {
 		c, _ := newNonStreamingFailoverTestContext()
 		require.NotNil(t, svc.nonStreamingFailedEventFailover(c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, false, resp, payload, msg))
 	})
+
+	t.Run("observed_overload_message_failovers", func(t *testing.T) {
+		c, _ := newNonStreamingFailoverTestContext()
+		observedPayload := []byte(`{"type":"response.failed","error":{"message":"` + openAIUpstreamOverloadMessage + `","type":"invalid_request_error"}}`)
+		failoverErr := svc.nonStreamingFailedEventFailover(
+			c,
+			&Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+			false,
+			resp,
+			observedPayload,
+			openAIUpstreamOverloadMessage,
+		)
+		require.NotNil(t, failoverErr)
+		require.False(t, failoverErr.RetryableOnSameAccount)
+		require.True(t, failoverErr.RequestScopedTransient)
+	})
 }
