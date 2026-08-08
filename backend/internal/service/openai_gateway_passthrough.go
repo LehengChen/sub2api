@@ -759,17 +759,8 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	if trimmed == "" {
 		return false
 	}
-	switch strings.TrimSpace(eventType) {
-	case "response.failed":
+	if strings.TrimSpace(eventType) == "response.failed" {
 		return false
-	case "error":
-		// 上游降载/瞬时故障会先推 {"type":"error"} 帧、再以 response.failed 收尾。
-		// 可重试类错误帧不能算客户端输出：一旦把它当首输出 flush，
-		// clientOutputStarted 即被固化，随后的 failed 事件永远进不了 pre-output
-		// failover 分支，只能把致命错误原样转发给客户端。不可重试类
-		// （content_policy / invalid_request 等）维持原样转发，保留上游错误细节。
-		payload := []byte(trimmed)
-		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
 	}
 	return !openAIStreamEventIsPreamble(eventType)
 }
@@ -784,7 +775,7 @@ func openAIStreamFailedEventErrorCode(payload []byte) string {
 	return code
 }
 
-// isOpenAIUpstreamCapacityShedEvent 判断流内 failed 事件是否为上游容量降载信号。
+// isOpenAIUpstreamCapacityShedEvent 判断流内 error/failed 事件是否为上游容量降载信号。
 // 上游在容量紧张时会把请求丢进降载路径：HTTP 200 之后立刻推 event: error
 // （code=server_is_overloaded / slow_down）并以 response.failed 收尾。
 func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
@@ -794,41 +785,6 @@ func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
 	default:
 		return false
 	}
-}
-
-// openAICapacityShedRetryableClientCode 是把上游容量降载错误转发给客户端时改写
-// 使用的错误码。Codex CLI 按闭集对错误码分类：server_is_overloaded / slow_down
-// 被判为致命错误（客户端提示 "Selected model is at capacity. Please try a
-// different model." 并直接终止会话），而 server_error 等致命集之外的错误码会进入
-// 客户端内置的退避重试。
-const openAICapacityShedRetryableClientCode = "server_error"
-
-// sanitizeOpenAICapacityShedErrorCodeForClient 把即将写给下游客户端的
-// error / response.failed 事件中的容量降载错误码改写为客户端可重试的错误码。
-// 走到转发这一步说明网关侧 failover 已不可用（流中途）或已用尽；保留原始降载码
-// 只会让客户端就地终止会话。错误消息原样保留；监控与账号状态判定都基于改写前
-// 的原始 payload，不受影响。rate_limit 等其他错误码一律不动（客户端依赖
-// rate_limit_exceeded 原码解析重试延时）。
-func sanitizeOpenAICapacityShedErrorCodeForClient(payload []byte) ([]byte, bool) {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) || !isOpenAIUpstreamCapacityShedEvent(payload) {
-		return payload, false
-	}
-	updated := payload
-	changed := false
-	for _, path := range []string{"response.error.code", "error.code"} {
-		switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(updated, path).String())) {
-		case "server_is_overloaded", "slow_down":
-		default:
-			continue
-		}
-		next, err := sjson.SetBytes(updated, path, openAICapacityShedRetryableClientCode)
-		if err != nil {
-			return payload, false
-		}
-		updated = next
-		changed = true
-	}
-	return updated, changed
 }
 
 func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
@@ -989,12 +945,8 @@ func openAIStreamFailedEventRetryableOnSameAccount(account *Account, payload []b
 	if account == nil {
 		return false
 	}
-	// 容量降载是请求级信号，不是账号级故障：上游只是让本次请求稍后再试。
-	// 换账号并不改变被降载的因素（客户端身份、模型容量都与账号无关），
-	// 只会让单个请求把整池账号逐个消耗掉，最终仍以同一个错误告终。
-	// 因此先在同一账号上做有界重试，用尽后才按常规流程切号。
 	if isOpenAIUpstreamCapacityShedEvent(payload) {
-		return true
+		return !isOpenAIOAuthAccount(account)
 	}
 	if !account.IsPoolMode() {
 		return false
@@ -1181,6 +1133,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	failedMessage := ""
 	clientOutputStarted := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	currentSSEEventType := ""
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
 	pendingLines := make([]string, 0, 8)
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
@@ -1230,6 +1183,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		line := documentScanner.Text()
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
+		if eventType, ok := extractOpenAISSEEventLine(line); ok {
+			currentSSEEventType = eventType
+		}
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			trimmedData := strings.TrimSpace(data)
@@ -1264,6 +1220,21 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := strings.TrimSpace(gjson.Get(trimmedData, "type").String())
+			capacityEventType := eventType
+			if capacityEventType == "" {
+				capacityEventType = currentSSEEventType
+			}
+			if isOpenAIOAuthAccount(account) && capacityEventType == "error" && isOpenAIUpstreamCapacityShedEvent(dataBytes) &&
+				!openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				logger.FromContext(ctx).With(
+					zap.Int64("account_id", account.ID),
+					zap.String("capacity_code", openAIStreamFailedEventErrorCode(dataBytes)),
+					zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
+					zap.Bool("passthrough", true),
+				).Warn("openai.responses.oauth_capacity_prewrite_failover")
+				return resultWithUsage(),
+					s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
+			}
 			if eventType == "response.failed" {
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
 				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
@@ -1328,6 +1299,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				firstTokenMs = &ms
 			}
 			s.parseSSEUsageBytes(dataBytes, usage)
+		}
+		if line == "" {
+			currentSSEEventType = ""
 		}
 
 		if !clientDisconnected {
