@@ -5,11 +5,25 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/runtimecontrol"
 	"github.com/stretchr/testify/require"
 )
+
+type codexSyncStartProbeRepo struct {
+	SettingRepository
+	started chan struct{}
+}
+
+func (r *codexSyncStartProbeRepo) Get(context.Context, string) (*Setting, error) {
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	return nil, nil
+}
 
 func newStandbyWorkerFenceForTest(t *testing.T) *WorkerFence {
 	t.Helper()
@@ -54,4 +68,18 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 	require.True(t, moderation.workersDisabled)
 	moderation.enqueueAsync(ContentModerationCheckInput{}, nil, ContentModerationInput{}, "")
 	require.Zero(t, moderation.asyncEnqueued.Load())
+
+	codexSyncStarted := make(chan struct{}, 1)
+	codexSync := ProvideOpenAICodexVersionSyncService(
+		&codexSyncStartProbeRepo{started: codexSyncStarted},
+		&SettingService{},
+		&codexVersionSyncGitHubStub{},
+		fence,
+	)
+	select {
+	case <-codexSyncStarted:
+		t.Fatal("standby started Codex version synchronization")
+	case <-time.After(20 * time.Millisecond):
+	}
+	codexSync.Stop()
 }
