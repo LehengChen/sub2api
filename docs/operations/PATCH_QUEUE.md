@@ -275,3 +275,17 @@ upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/pull/5326
 - Drop condition: when upstream provides the same OAuth non-streaming
   classification, failover, and compatibility tests, stop replaying both
   patch units and mark FZ-011 `drop-upstreamed`.
+
+## FZ-012: restore lifecycle probe bypass for the embedded frontend
+
+```yaml
+id: FZ-012
+order: 115
+status: reimplement
+```
+
+- The v0.1.172 tree carries the FZ-005 lifecycle handlers, but its embedded
+  frontend middleware does not bypass `/livez` or `/readyz`; those paths then
+  receive the SPA document instead of the JSON health routes.
+- This two-line compatibility fix is required for the existing readiness and
+  ALB contracts. It has no effect on API routing or capacity classification.
