@@ -75,7 +75,7 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 
 	usagePool := ProvideUsageRecordWorkerPool(cfg, fence)
 	require.Nil(t, usagePool.pool)
-	require.Equal(t, UsageRecordSubmitModeDroppedStopped, usagePool.Submit(func(context.Context) {}))
+	require.Equal(t, UsageRecordSubmitModeDropped, usagePool.Submit(func(context.Context) {}))
 	usagePool.Stop()
 
 	subscription := ProvideSubscriptionService(nil, nil, billingCache, nil, cfg, fence)
