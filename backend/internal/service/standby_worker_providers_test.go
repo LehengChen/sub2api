@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -40,6 +41,26 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.SubscriptionMaintenance.WorkerCount = 1
 	cfg.SubscriptionMaintenance.QueueSize = 1
+	cfg.Pricing = config.PricingConfig{
+		RemoteUpdatesEnabled: true,
+		DataDir:              t.TempDir(),
+		FallbackFile:         filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"),
+	}
+
+	pricing, err := ProvidePricingService(cfg, &failOnUsePricingRemoteClient{t: t}, fence)
+	require.NoError(t, err)
+	require.True(t, cfg.Pricing.RemoteUpdatesEnabled)
+	pricingStopped := make(chan struct{})
+	go func() {
+		pricing.wg.Wait()
+		close(pricingStopped)
+	}()
+	select {
+	case <-pricingStopped:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("standby started pricing update scheduler")
+	}
+	pricing.Stop()
 
 	emailQueue := ProvideEmailQueueService(nil, fence)
 	require.True(t, emailQueue.disabled)
@@ -54,7 +75,7 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 
 	usagePool := ProvideUsageRecordWorkerPool(cfg, fence)
 	require.Nil(t, usagePool.pool)
-	require.Equal(t, UsageRecordSubmitModeDropped, usagePool.Submit(func(context.Context) {}))
+	require.Equal(t, UsageRecordSubmitModeDroppedStopped, usagePool.Submit(func(context.Context) {}))
 	usagePool.Stop()
 
 	subscription := ProvideSubscriptionService(nil, nil, billingCache, nil, cfg, fence)
@@ -64,7 +85,7 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 	subscription.DoWindowMaintenance(nil)
 	subscription.Stop()
 
-	moderation := ProvideContentModerationService(nil, nil, nil, nil, nil, nil, nil, fence)
+	moderation := ProvideContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil, fence)
 	require.True(t, moderation.workersDisabled)
 	moderation.enqueueAsync(ContentModerationCheckInput{}, nil, ContentModerationInput{}, "")
 	require.Zero(t, moderation.asyncEnqueued.Load())
