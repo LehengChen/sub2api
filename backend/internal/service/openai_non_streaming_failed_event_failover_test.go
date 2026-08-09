@@ -93,6 +93,41 @@ func TestNonStreamingPassthroughSSEToJSONCapacityFailedReturnsFailover(t *testin
 	require.Empty(t, rec.Body.String())
 }
 
+func TestNonStreamingBareCapacityReturnsFailover(t *testing.T) {
+	body := strings.Join([]string{
+		"event:error",
+		`data: {"error":{"code":"server_is_overloaded","message":"` + openAIUpstreamOverloadMessage + `"}}`,
+		"",
+	}, "\n")
+	for name, run := range map[string]func(*OpenAIGatewayService, *http.Response, *gin.Context, *Account) error{
+		"native": func(svc *OpenAIGatewayService, resp *http.Response, c *gin.Context, account *Account) error {
+			_, err := svc.handleNonStreamingResponse(context.Background(), resp, c, account, "gpt-5.5", "gpt-5.5")
+			return err
+		},
+		"passthrough": func(svc *OpenAIGatewayService, resp *http.Response, c *gin.Context, account *Account) error {
+			_, err := svc.handleNonStreamingResponsePassthrough(context.Background(), resp, c, account, "gpt-5.5", "gpt-5.5")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := newNonStreamingFailoverTestService()
+			c, rec := newNonStreamingFailoverTestContext()
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+
+			err := run(svc, resp, c, &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.True(t, failoverErr.OpenAIOAuthCapacity)
+			require.Empty(t, rec.Body.String())
+		})
+	}
+}
+
 // 用户参数错误不是临时故障，必须原样回写而不是浪费一次切号。
 func TestNonStreamingSSEToJSONInvalidRequestFailedStillWritesError(t *testing.T) {
 	svc := newNonStreamingFailoverTestService()
@@ -167,6 +202,9 @@ func TestNonStreamingSSEToJSONSkipsFailoverAfterResponseCommitted(t *testing.T) 
 	require.False(t, errors.As(err, &failoverErr),
 		"响应已提交后必须沿用原有错误回写路径，不得切号")
 	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Body.String(), `"type":"server_error"`)
+	require.NotContains(t, strings.ToLower(rec.Body.String()), "at capacity")
+	require.NotContains(t, strings.ToLower(rec.Body.String()), "overload")
 }
 
 func TestNonStreamingFailedEventFailoverKeepsNonOAuthHEAD(t *testing.T) {
