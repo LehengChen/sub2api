@@ -114,13 +114,14 @@ type BillingCacheService struct {
 	circuitBreaker        *billingCircuitBreaker
 	userPlatformQuotaRepo UserPlatformQuotaRepository
 
-	cacheWriteChan     chan cacheWriteTask
-	cacheWriteWg       sync.WaitGroup
-	cacheWriteStopOnce sync.Once
-	cacheWriteMu       sync.RWMutex
-	stopped            atomic.Bool
-	balanceLoadSF      singleflight.Group
-	quotaLoadSF        singleflight.Group
+	cacheWriteChan            chan cacheWriteTask
+	cacheWriteWg              sync.WaitGroup
+	cacheWriteStopOnce        sync.Once
+	cacheWriteMu              sync.RWMutex
+	stopped                   atomic.Bool
+	backgroundWorkersDisabled bool
+	balanceLoadSF             singleflight.Group
+	quotaLoadSF               singleflight.Group
 	// 丢弃日志节流计数器（减少高负载下日志噪音）
 	cacheWriteDropFullCount     uint64
 	cacheWriteDropFullLastLog   int64
@@ -139,18 +140,35 @@ func NewBillingCacheService(
 	cfg *config.Config,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
 ) *BillingCacheService {
+	return newBillingCacheService(cache, userRepo, subRepo, apiKeyRepo, userRPMCache, userGroupRateRepo, cfg, userPlatformQuotaRepo, true)
+}
+
+func newBillingCacheService(
+	cache BillingCache,
+	userRepo UserRepository,
+	subRepo UserSubscriptionRepository,
+	apiKeyRepo APIKeyRepository,
+	userRPMCache UserRPMCache,
+	userGroupRateRepo UserGroupRateRepository,
+	cfg *config.Config,
+	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	startWorkers bool,
+) *BillingCacheService {
 	svc := &BillingCacheService{
-		cache:                 cache,
-		userRepo:              userRepo,
-		subRepo:               subRepo,
-		apiKeyRateLimitLoader: apiKeyRepo,
-		userRPMCache:          userRPMCache,
-		userGroupRateRepo:     userGroupRateRepo,
-		cfg:                   cfg,
-		userPlatformQuotaRepo: userPlatformQuotaRepo,
+		cache:                     cache,
+		userRepo:                  userRepo,
+		subRepo:                   subRepo,
+		apiKeyRateLimitLoader:     apiKeyRepo,
+		userRPMCache:              userRPMCache,
+		userGroupRateRepo:         userGroupRateRepo,
+		cfg:                       cfg,
+		userPlatformQuotaRepo:     userPlatformQuotaRepo,
+		backgroundWorkersDisabled: !startWorkers,
 	}
 	svc.circuitBreaker = newBillingCircuitBreaker(cfg.Billing.CircuitBreaker)
-	svc.startCacheWriteWorkers()
+	if startWorkers {
+		svc.startCacheWriteWorkers()
+	}
 	return svc
 }
 
@@ -377,7 +395,7 @@ func (s *BillingCacheService) DeductBalanceCache(ctx context.Context, userID int
 
 // QueueDeductBalance 异步扣减余额缓存
 func (s *BillingCacheService) QueueDeductBalance(userID int64, amount float64) {
-	if s.cache == nil {
+	if s.cache == nil || s.backgroundWorkersDisabled {
 		return
 	}
 	// 队列满时同步回退，避免关键扣减被静默丢弃。
@@ -430,12 +448,14 @@ func (s *BillingCacheService) GetSubscriptionStatus(ctx context.Context, userID,
 	}
 
 	// 异步建立缓存
-	_ = s.enqueueCacheWrite(cacheWriteTask{
-		kind:             cacheWriteSetSubscription,
-		userID:           userID,
-		groupID:          groupID,
-		subscriptionData: data,
-	})
+	if !s.backgroundWorkersDisabled {
+		_ = s.enqueueCacheWrite(cacheWriteTask{
+			kind:             cacheWriteSetSubscription,
+			userID:           userID,
+			groupID:          groupID,
+			subscriptionData: data,
+		})
+	}
 
 	return data, nil
 }
@@ -499,7 +519,7 @@ func (s *BillingCacheService) UpdateSubscriptionUsage(ctx context.Context, userI
 
 // QueueUpdateSubscriptionUsage 异步更新订阅用量缓存
 func (s *BillingCacheService) QueueUpdateSubscriptionUsage(userID, groupID int64, costUSD float64) {
-	if s.cache == nil {
+	if s.cache == nil || s.backgroundWorkersDisabled {
 		return
 	}
 	// 队列满时同步回退，确保订阅用量及时更新。
@@ -689,7 +709,7 @@ func (s *BillingCacheService) evaluateRateLimits(ctx context.Context, apiKey *AP
 
 // QueueUpdateAPIKeyRateLimitUsage asynchronously updates rate limit usage in the cache.
 func (s *BillingCacheService) QueueUpdateAPIKeyRateLimitUsage(apiKeyID int64, cost float64) {
-	if s.cache == nil {
+	if s.cache == nil || s.backgroundWorkersDisabled {
 		return
 	}
 	s.enqueueCacheWrite(cacheWriteTask{

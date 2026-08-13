@@ -26,6 +26,37 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
 }
 
+func TestAccountRepository_ExtendOverloadedUsesMonotonicUpdate(t *testing.T) {
+	until := time.Now().Add(2 * time.Minute)
+	for name, tt := range map[string]struct {
+		affected     rowsAffectedResult
+		queryCount   int
+		writesOutbox bool
+	}{
+		"later value is a no-op":    {affected: 0, queryCount: 1},
+		"earlier value is extended": {affected: 1, queryCount: 2, writesOutbox: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			exec := &recordingSQLExecutor{result: tt.affected}
+			repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+			err := repo.ExtendOverloaded(context.Background(), 42, until)
+
+			require.NoError(t, err)
+			require.Len(t, exec.execQueries, tt.queryCount)
+			normalized := normalizeSQLWhitespace(exec.execQueries[0])
+			require.Contains(t, normalized, "overload_until IS NULL OR overload_until < $1")
+			require.Equal(t, []any{until, int64(42)}, exec.execArgs[0])
+			allQueries := strings.Join(exec.execQueries, "\n")
+			if tt.writesOutbox {
+				require.Contains(t, allQueries, "scheduler_outbox")
+			} else {
+				require.NotContains(t, allQueries, "scheduler_outbox")
+			}
+		})
+	}
+}
+
 func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomicallyPropagated(t *testing.T) {
 	proxyID := int64(77)
 	snapshot := service.GrokCredentialMutationSnapshot{

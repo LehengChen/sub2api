@@ -50,7 +50,7 @@ const (
 )
 
 type GeminiOAuthService struct {
-	sessionStore *geminicli.SessionStore
+	sessionStore OAuthSessionStore
 	proxyRepo    ProxyRepository
 	oauthClient  GeminiOAuthClient
 	codeAssist   GeminiCliCodeAssistClient
@@ -71,13 +71,36 @@ func NewGeminiOAuthService(
 	cfg *config.Config,
 ) *GeminiOAuthService {
 	return &GeminiOAuthService{
-		sessionStore: geminicli.NewSessionStore(),
+		sessionStore: NewMemoryOAuthSessionStore(),
 		proxyRepo:    proxyRepo,
 		oauthClient:  oauthClient,
 		codeAssist:   codeAssist,
 		driveClient:  driveClient,
 		cfg:          cfg,
 	}
+}
+
+// NewGeminiOAuthServiceWithSessionStore creates a Gemini OAuth service using
+// a caller-provided store. Multi-instance deployments must inject a shared store.
+func NewGeminiOAuthServiceWithSessionStore(
+	proxyRepo ProxyRepository,
+	oauthClient GeminiOAuthClient,
+	codeAssist GeminiCliCodeAssistClient,
+	driveClient geminicli.DriveClient,
+	cfg *config.Config,
+	sessionStore OAuthSessionStore,
+) (*GeminiOAuthService, error) {
+	if sessionStore == nil {
+		return nil, errors.New("oauth session store is required")
+	}
+	return &GeminiOAuthService{
+		sessionStore: sessionStore,
+		proxyRepo:    proxyRepo,
+		oauthClient:  oauthClient,
+		codeAssist:   codeAssist,
+		driveClient:  driveClient,
+		cfg:          cfg,
+	}, nil
 }
 
 func (s *GeminiOAuthService) GetOAuthConfig() *GeminiOAuthCapabilities {
@@ -146,8 +169,6 @@ func (s *GeminiOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		OAuthType:    oauthType,
 		CreatedAt:    time.Now(),
 	}
-	s.sessionStore.Set(sessionID, session)
-
 	effectiveCfg, err := geminicli.EffectiveOAuthConfig(oauthCfg, oauthType)
 	if err != nil {
 		return nil, err
@@ -169,11 +190,13 @@ func (s *GeminiOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		redirectURI = geminicli.AIStudioOAuthRedirectURI
 	}
 	session.RedirectURI = redirectURI
-	s.sessionStore.Set(sessionID, session)
 
 	authURL, err := geminicli.BuildAuthorizationURL(effectiveCfg, state, codeChallenge, redirectURI, session.ProjectID, oauthType)
 	if err != nil {
 		return nil, err
+	}
+	if err := s.sessionStore.Save(ctx, OAuthSessionProviderGemini, sessionID, session, geminicli.SessionTTL); err != nil {
+		return nil, fmt.Errorf("oauth session store unavailable")
 	}
 
 	return &GeminiAuthURLResult{
@@ -444,12 +467,18 @@ func (s *GeminiOAuthService) RefreshAccountGoogleOneTier(
 
 func (s *GeminiOAuthService) ExchangeCode(ctx context.Context, input *GeminiExchangeCodeInput) (*GeminiTokenInfo, error) {
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] ========== ExchangeCode START ==========")
+	if input == nil {
+		return nil, fmt.Errorf("input is required")
+	}
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] SessionID: %s", input.SessionID)
 
-	session, ok := s.sessionStore.Get(input.SessionID)
-	if !ok {
+	var session geminicli.OAuthSession
+	if err := s.sessionStore.Consume(ctx, OAuthSessionProviderGemini, input.SessionID, &session); errors.Is(err, ErrOAuthSessionNotFound) {
 		logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] ERROR: Session not found or expired")
 		return nil, fmt.Errorf("session not found or expired")
+	} else if err != nil {
+		logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] ERROR: Session store unavailable")
+		return nil, fmt.Errorf("oauth session store unavailable")
 	}
 	if strings.TrimSpace(input.State) == "" || input.State != session.State {
 		logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] ERROR: Invalid state")
@@ -506,7 +535,6 @@ func (s *GeminiOAuthService) ExchangeCode(ctx context.Context, input *GeminiExch
 	logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Token expires_in: %d seconds", tokenResp.ExpiresIn)
 
 	sessionProjectID := strings.TrimSpace(session.ProjectID)
-	s.sessionStore.Delete(input.SessionID)
 
 	// 计算过期时间：减去 5 分钟安全时间窗口（考虑网络延迟和时钟偏差）
 	// 同时设置下界保护，防止 expires_in 过小导致过去时间（引发刷新风暴）
@@ -916,7 +944,7 @@ func (s *GeminiOAuthService) BuildAccountCredentials(tokenInfo *GeminiTokenInfo)
 }
 
 func (s *GeminiOAuthService) Stop() {
-	s.sessionStore.Stop()
+	_ = s.sessionStore.Close()
 }
 
 func (s *GeminiOAuthService) fetchProjectID(ctx context.Context, accessToken, proxyURL string) (string, string, error) {

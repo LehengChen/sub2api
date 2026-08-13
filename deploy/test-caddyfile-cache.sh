@@ -50,6 +50,11 @@ if ! printf '%s\n' "$normalized_config" | grep -Eq '^reverse_proxy localhost:808
 	exit 1
 fi
 
+if ! printf '%s\n' "$normalized_config" | grep -Eq '^health_uri /readyz$'; then
+	echo "Caddyfile must use dependency-aware /readyz for upstream health" >&2
+	exit 1
+fi
+
 if printf '%s\n' "$normalized_config" | grep -Eq '^import([[:space:]]|$)'; then
 	echo "Caddyfile must not import configuration outside this canonical policy check" >&2
 	exit 1

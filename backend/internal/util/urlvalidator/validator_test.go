@@ -21,6 +21,9 @@ func TestValidateURLFormat(t *testing.T) {
 	if _, err := ValidateURLFormat("https://example.com:bad", true); err == nil {
 		t.Fatalf("expected invalid port to fail")
 	}
+	if _, err := ValidateURLFormat("https://user:secret@example.com", false); err == nil || err.Error() != "url must not include userinfo" {
+		t.Fatalf("expected userinfo to fail without exposing its value, got %v", err)
+	}
 
 	// 验证末尾斜杠被移除
 	normalized, err := ValidateURLFormat("https://example.com/", false)
@@ -65,6 +68,12 @@ func TestValidateHTTPURL(t *testing.T) {
 	}
 	if _, err := ValidateHTTPURL("https://api.example.com", false, ValidationOptions{AllowedHosts: []string{"api.example.com"}}); err != nil {
 		t.Fatalf("expected allowlisted host to pass, got %v", err)
+	}
+	if _, err := ValidateHTTPURL("https://api.example.com:443", false, ValidationOptions{AllowedHosts: []string{"api.example.com"}}); err != nil {
+		t.Fatalf("expected valid HTTPS port on an allowlisted host to pass, got %v", err)
+	}
+	if _, err := ValidateHTTPURL("https://user:secret@api.example.com", false, ValidationOptions{AllowedHosts: []string{"api.example.com"}}); err == nil || err.Error() != "url must not include userinfo" {
+		t.Fatalf("expected userinfo to fail without exposing its value, got %v", err)
 	}
 	if _, err := ValidateHTTPURL("https://sub.api.example.com", false, ValidationOptions{AllowedHosts: []string{"*.example.com"}}); err != nil {
 		t.Fatalf("expected wildcard allowlist to pass, got %v", err)

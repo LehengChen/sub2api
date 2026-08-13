@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -39,6 +40,47 @@ func TestPricingNonEmptyInvalidRemoteURLStillReturnsValidationError(t *testing.T
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid pricing url")
+}
+
+type failOnUsePricingRemoteClient struct {
+	t *testing.T
+}
+
+func (c *failOnUsePricingRemoteClient) FetchPricingJSON(context.Context, string) ([]byte, error) {
+	c.t.Fatal("offline pricing mode must not fetch remote pricing data")
+	return nil, nil
+}
+
+func (c *failOnUsePricingRemoteClient) FetchHashText(context.Context, string) (string, error) {
+	c.t.Fatal("offline pricing mode must not fetch the remote pricing hash")
+	return "", nil
+}
+
+func TestPricingServiceInitializeOfflineUsesFallbackWithoutRemoteCalls(t *testing.T) {
+	t.Parallel()
+
+	dataDir := filepath.Join(t.TempDir(), "data")
+	fallbackFile := filepath.Join(t.TempDir(), "fallback.json")
+	require.NoError(t, os.WriteFile(fallbackFile, []byte(`{
+		"offline-test-model": {
+			"input_cost_per_token": 0.000001,
+			"output_cost_per_token": 0.000002,
+			"litellm_provider": "test",
+			"mode": "chat"
+		}
+	}`), 0o600))
+
+	cfg := &config.Config{Pricing: config.PricingConfig{
+		RemoteUpdatesEnabled: false,
+		DataDir:              dataDir,
+		FallbackFile:         fallbackFile,
+	}}
+	svc := NewPricingService(cfg, &failOnUsePricingRemoteClient{t: t})
+
+	require.NoError(t, svc.Initialize())
+	t.Cleanup(svc.Stop)
+	require.NotNil(t, svc.GetModelPricing("offline-test-model"))
+	require.FileExists(t, filepath.Join(dataDir, "model_pricing.json"))
 }
 
 func TestParsePricingData_ParsesPriorityAndServiceTierFields(t *testing.T) {

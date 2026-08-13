@@ -72,7 +72,7 @@ vi.mock('@/api/admin/usage', () => ({
 
 vi.mock('file-saver', () => ({ saveAs }))
 
-vi.mock('xlsx', () => ({
+vi.mock('@e965/xlsx', () => ({
 	utils: {
 		aoa_to_sheet: aoaToSheet,
 		sheet_add_aoa: sheetAddAoa,
