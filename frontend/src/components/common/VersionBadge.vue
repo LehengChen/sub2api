@@ -6,11 +6,19 @@
         @click="toggleDropdown"
         class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
         :class="[
-          hasUpdate
+          hasUpdate || versionWarning
             ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
             : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
         ]"
-        :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
+        :title="
+          isExternallyManaged
+            ? t('version.externallyManaged')
+            : versionWarning
+              ? t('version.checkWarning')
+              : hasUpdate
+                ? t('version.updateAvailable')
+                : t('version.upToDate')
+        "
       >
         <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
         <span
@@ -32,7 +40,7 @@
           v-if="dropdownOpen"
           ref="dropdownRef"
           class="absolute left-0 z-50 mt-2 overflow-hidden whitespace-normal rounded-xl border border-gray-200 bg-white shadow-lg transition-all duration-200 dark:border-dark-700 dark:bg-dark-800"
-          :class="rollbackPanelOpen && isReleaseBuild ? 'w-80' : 'w-64'"
+          :class="isExternallyManaged || (rollbackPanelOpen && isReleaseBuild) ? 'w-80' : 'w-64'"
         >
           <!-- Header with refresh button -->
           <div
@@ -89,7 +97,7 @@
                   <span v-else class="text-2xl font-bold text-gray-400 dark:text-dark-500">--</span>
                   <!-- Show check mark when up to date -->
                   <span
-                    v-if="!hasUpdate"
+                    v-if="!hasUpdate && !versionWarning && !isExternallyManaged"
                     class="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
                   >
                     <svg
@@ -107,15 +115,108 @@
                 </div>
                 <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
                   {{
-                    hasUpdate
-                      ? t('version.latestVersion') + ': v' + latestVersion
-                      : t('version.upToDate')
+                    isExternallyManaged
+                      ? t('version.externallyManaged')
+                      : versionWarning
+                        ? t('version.statusUnverified')
+                        : hasUpdate
+                          ? t('version.latestVersion') + ': v' + latestVersion
+                          : t('version.upToDate')
                   }}
                 </p>
               </div>
 
+              <div
+                v-if="versionWarning"
+                class="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-amber-700 dark:border-amber-800/50 dark:bg-amber-900/20 dark:text-amber-300"
+              >
+                <Icon
+                  name="exclamationTriangle"
+                  size="sm"
+                  :stroke-width="2"
+                  class="mt-0.5 flex-shrink-0"
+                />
+                <div class="min-w-0 text-xs leading-4">
+                  <p class="font-medium">{{ t('version.checkWarning') }}</p>
+                  <p class="break-words opacity-80">{{ versionWarning }}</p>
+                  <p v-if="versionCached" class="mt-1 font-medium">
+                    {{ t('version.cachedWarning') }}
+                  </p>
+                </div>
+              </div>
+
+              <!-- Externally managed deployments are strictly read-only. -->
+              <div v-if="isExternallyManaged" class="space-y-3">
+                <div
+                  class="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800/50 dark:bg-blue-900/20"
+                >
+                  <Icon
+                    name="server"
+                    size="sm"
+                    :stroke-width="2"
+                    class="mt-0.5 flex-shrink-0 text-blue-600 dark:text-blue-400"
+                  />
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-blue-700 dark:text-blue-300">
+                      {{ t('version.externallyManaged') }}
+                    </p>
+                    <p class="mt-0.5 text-xs leading-4 text-blue-600/80 dark:text-blue-400/80">
+                      {{ t('version.externallyManagedHint') }}
+                    </p>
+                  </div>
+                </div>
+
+                <dl
+                  v-if="releaseCatalog"
+                  class="space-y-2 rounded-lg border border-gray-200 p-3 text-xs dark:border-dark-700"
+                >
+                  <div v-if="releaseCatalog.source" class="space-y-0.5">
+                    <dt class="text-gray-400 dark:text-dark-500">{{ t('version.catalogSource') }}</dt>
+                    <dd class="break-all font-mono text-gray-700 dark:text-dark-200">
+                      {{ releaseCatalog.source }}
+                    </dd>
+                  </div>
+                  <div v-if="releaseCatalog.version" class="space-y-0.5">
+                    <dt class="text-gray-400 dark:text-dark-500">{{ t('version.approvedVersion') }}</dt>
+                    <dd class="break-all font-mono text-gray-700 dark:text-dark-200">
+                      {{ releaseCatalog.version }}
+                    </dd>
+                  </div>
+                  <div v-if="releaseCatalog.app_tag" class="space-y-0.5">
+                    <dt class="text-gray-400 dark:text-dark-500">{{ t('version.appTag') }}</dt>
+                    <dd class="break-all font-mono text-gray-700 dark:text-dark-200">
+                      {{ releaseCatalog.app_tag }}
+                    </dd>
+                  </div>
+                  <div v-if="releaseCatalog.source_revision" class="space-y-0.5">
+                    <dt class="text-gray-400 dark:text-dark-500">{{ t('version.sourceRevision') }}</dt>
+                    <dd class="break-all font-mono text-gray-700 dark:text-dark-200">
+                      {{ releaseCatalog.source_revision }}
+                    </dd>
+                  </div>
+                  <div v-if="releaseCatalog.image_digest" class="space-y-0.5">
+                    <dt class="text-gray-400 dark:text-dark-500">{{ t('version.imageDigest') }}</dt>
+                    <dd class="break-all font-mono text-gray-700 dark:text-dark-200">
+                      {{ releaseCatalog.image_digest }}
+                    </dd>
+                  </div>
+                  <div v-if="releaseCatalog.ops_revision" class="space-y-0.5">
+                    <dt class="text-gray-400 dark:text-dark-500">{{ t('version.opsRevision') }}</dt>
+                    <dd class="break-all font-mono text-gray-700 dark:text-dark-200">
+                      {{ releaseCatalog.ops_revision }}
+                    </dd>
+                  </div>
+                </dl>
+                <p
+                  v-if="catalogStatus === 'incomplete'"
+                  class="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-700 dark:border-amber-800/50 dark:bg-amber-900/20 dark:text-amber-300"
+                >
+                  {{ t('version.catalogIncomplete') }}
+                </p>
+              </div>
+
               <!-- Priority 1: Update error (must check before hasUpdate) -->
-              <div v-if="updateError" class="space-y-2">
+              <div v-else-if="updateError" class="space-y-2">
                 <div
                   class="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800/50 dark:bg-red-900/20"
                 >
@@ -676,6 +777,14 @@ const latestVersion = computed(() => appStore.latestVersion)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
+const versionCached = computed(() => appStore.versionCached)
+const versionWarning = computed(() => appStore.versionWarning)
+const isExternallyManaged = computed(
+  () => appStore.managedExternally || appStore.deploymentMode === 'externally_managed'
+)
+const updateCapabilities = computed(() => appStore.updateCapabilities)
+const releaseCatalog = computed(() => appStore.releaseCatalog)
+const catalogStatus = computed(() => appStore.catalogStatus)
 
 // Update process states (local to this component)
 const updating = ref(false)
@@ -752,7 +861,7 @@ async function refreshVersion(force = true) {
 }
 
 async function handleUpdate() {
-  if (updating.value) return
+  if (updating.value || isExternallyManaged.value || !updateCapabilities.value.update) return
 
   updating.value = true
   updateError.value = ''
@@ -783,7 +892,7 @@ function resetRollbackState() {
 }
 
 async function toggleRollbackPanel() {
-  if (!isAdmin.value) return
+  if (!isAdmin.value || isExternallyManaged.value || !updateCapabilities.value.rollback) return
   rollbackPanelOpen.value = !rollbackPanelOpen.value
   // Source builds only show a hint, no version list to fetch
   if (
@@ -797,7 +906,7 @@ async function toggleRollbackPanel() {
 }
 
 async function loadRollbackVersions() {
-  if (!isAdmin.value) return
+  if (!isAdmin.value || isExternallyManaged.value || !updateCapabilities.value.rollback) return
   rollbackVersionsLoading.value = true
   rollbackVersionsError.value = ''
   try {
@@ -813,7 +922,7 @@ async function loadRollbackVersions() {
 }
 
 function selectRollbackVersion(version: string) {
-  if (rollingBack.value) return
+  if (rollingBack.value || isExternallyManaged.value || !updateCapabilities.value.rollback) return
   rollbackError.value = ''
   selectedRollbackVersion.value = selectedRollbackVersion.value === version ? '' : version
 }
@@ -826,7 +935,7 @@ function formatPublishedAt(publishedAt: string): string {
 }
 
 async function handleRollback() {
-  if (!isAdmin.value) return
+  if (!isAdmin.value || isExternallyManaged.value || !updateCapabilities.value.rollback) return
   if (rollingBack.value || !selectedRollbackVersion.value) return
 
   rollingBack.value = true
@@ -849,7 +958,7 @@ async function handleRollback() {
 }
 
 async function handleRestart() {
-  if (restarting.value) return
+  if (restarting.value || isExternallyManaged.value || !updateCapabilities.value.restart) return
 
   restarting.value = true
   restartCountdown.value = 8

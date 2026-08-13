@@ -34,6 +34,11 @@ type systemHandlerUpdateServiceStub struct {
 	rollbackVersions      []service.RollbackVersion
 	rollbackVersionsErr   error
 	rollbackVersionsCall  int
+	externallyManaged     bool
+}
+
+func (s *systemHandlerUpdateServiceStub) IsExternallyManaged() bool {
+	return s.externallyManaged
 }
 
 func (s *systemHandlerUpdateServiceStub) CheckUpdate(_ context.Context, force bool) (*service.UpdateInfo, error) {
@@ -101,6 +106,7 @@ func newSystemHandlerTestRouter(t *testing.T, updateSvc *systemHandlerUpdateServ
 	router.POST("/api/v1/admin/system/update", handler.PerformUpdate)
 	router.POST("/api/v1/admin/system/rollback", handler.Rollback)
 	router.GET("/api/v1/admin/system/rollback-versions", handler.GetRollbackVersions)
+	router.POST("/api/v1/admin/system/restart", handler.RestartService)
 	return router
 }
 
@@ -321,4 +327,48 @@ func TestSystemHandlerGetRollbackVersionsError(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestSystemHandlerExternallyManagedRejectsUpdateRollbackAndRestart(t *testing.T) {
+	updateSvc := &systemHandlerUpdateServiceStub{externallyManaged: true}
+	repo := newMemoryIdempotencyRepoStub()
+	router := newSystemHandlerTestRouter(t, updateSvc, repo)
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "update", path: "/api/v1/admin/system/update"},
+		{name: "rollback", path: "/api/v1/admin/system/rollback"},
+		{name: "restart", path: "/api/v1/admin/system/restart"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.Header.Set("Idempotency-Key", "external-"+tc.name)
+			router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			var body systemUpdateErrorEnvelope
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Equal(t, "application updates, rollbacks, and restarts are managed by external operations", body.Message)
+		})
+	}
+
+	require.Zero(t, updateSvc.performCall)
+	require.Zero(t, updateSvc.rollbackCall)
+	require.Zero(t, updateSvc.rollbackToCall)
+}
+
+func TestSystemHandlerExternallyManagedRejectsRollbackVersionListing(t *testing.T) {
+	updateSvc := &systemHandlerUpdateServiceStub{externallyManaged: true}
+	repo := newMemoryIdempotencyRepoStub()
+	router := newSystemHandlerTestRouter(t, updateSvc, repo)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/system/rollback-versions", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Zero(t, updateSvc.rollbackVersionsCall)
 }

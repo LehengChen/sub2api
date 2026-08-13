@@ -51,6 +51,13 @@ type systemUpdateService interface {
 	RollbackToVersion(ctx context.Context, version string) error
 }
 
+// deploymentControlReader is kept optional so lightweight test doubles and
+// older integrations remain source-compatible. The concrete UpdateService
+// always implements it, and its own mutation methods enforce the same policy.
+type deploymentControlReader interface {
+	IsExternallyManaged() bool
+}
+
 // NewSystemHandler creates a new SystemHandler
 func NewSystemHandler(updateSvc systemUpdateService, lockSvc *service.SystemOperationLockService) *SystemHandler {
 	return &SystemHandler{
@@ -62,9 +69,22 @@ func NewSystemHandler(updateSvc systemUpdateService, lockSvc *service.SystemOper
 // GetVersion returns the current version
 // GET /api/v1/admin/system/version
 func (h *SystemHandler) GetVersion(c *gin.Context) {
-	info, _ := h.updateSvc.CheckUpdate(c.Request.Context(), false)
+	info, err := h.updateSvc.CheckUpdate(c.Request.Context(), false)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if info == nil {
+		response.Error(c, http.StatusServiceUnavailable, "version information unavailable")
+		return
+	}
 	response.Success(c, gin.H{
-		"version": info.CurrentVersion,
+		"version":            info.CurrentVersion,
+		"deployment_mode":    info.DeploymentMode,
+		"managed_externally": info.ManagedExternally,
+		"capabilities":       info.Capabilities,
+		"catalog":            info.Catalog,
+		"catalog_status":     info.CatalogStatus,
 	})
 }
 
@@ -83,6 +103,9 @@ func (h *SystemHandler) CheckUpdates(c *gin.Context) {
 // PerformUpdate downloads and applies the update
 // POST /api/v1/admin/system/update
 func (h *SystemHandler) PerformUpdate(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	operationID := buildSystemOperationID(c, "update")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.update", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {
@@ -131,9 +154,12 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 // GetRollbackVersions lists versions available for rollback
 // GET /api/v1/admin/system/rollback-versions
 func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	versions, err := h.updateSvc.ListRollbackVersions(c.Request.Context())
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, err.Error())
+		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, gin.H{
@@ -147,6 +173,9 @@ func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
 // installs that specific release (must be one of the recent rollback versions).
 // POST /api/v1/admin/system/rollback
 func (h *SystemHandler) Rollback(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	var req struct {
 		Version string `json:"version"`
 	}
@@ -201,6 +230,9 @@ func (h *SystemHandler) Rollback(c *gin.Context) {
 // RestartService restarts the systemd service
 // POST /api/v1/admin/system/restart
 func (h *SystemHandler) RestartService(c *gin.Context) {
+	if h.rejectExternallyManaged(c) {
+		return
+	}
 	operationID := buildSystemOperationID(c, "restart")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.restart", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {
@@ -226,6 +258,15 @@ func (h *SystemHandler) RestartService(c *gin.Context) {
 			"operation_id": lock.OperationID(),
 		}, nil
 	})
+}
+
+func (h *SystemHandler) rejectExternallyManaged(c *gin.Context) bool {
+	reader, ok := h.updateSvc.(deploymentControlReader)
+	if !ok || !reader.IsExternallyManaged() {
+		return false
+	}
+	response.ErrorFrom(c, service.ErrExternallyManaged)
+	return true
 }
 
 func (h *SystemHandler) acquireSystemLock(

@@ -255,7 +255,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		imageCount = result.imageCount
 		imageOutputSizes = result.imageOutputSizes
 	} else {
-		result, err := s.handleNonStreamingResponsePassthrough(ctx, resp, c, reqModel, upstreamPassthroughModel)
+		result, err := s.handleNonStreamingResponsePassthrough(ctx, resp, c, account, reqModel, upstreamPassthroughModel)
 		if err != nil {
 			return nil, err
 		}
@@ -796,17 +796,8 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	if trimmed == "" {
 		return false
 	}
-	switch strings.TrimSpace(eventType) {
-	case "response.failed":
+	if strings.TrimSpace(eventType) == "response.failed" {
 		return false
-	case "error":
-		// 上游降载/瞬时故障会先推 {"type":"error"} 帧、再以 response.failed 收尾。
-		// 可重试类错误帧不能算客户端输出：一旦把它当首输出 flush，
-		// clientOutputStarted 即被固化，随后的 failed 事件永远进不了 pre-output
-		// failover 分支，只能把致命错误原样转发给客户端。不可重试类
-		// （content_policy / invalid_request 等）维持原样转发，保留上游错误细节。
-		payload := []byte(trimmed)
-		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
 	}
 	return !openAIStreamEventIsPreamble(eventType)
 }
@@ -868,6 +859,75 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	return false
 }
 
+// openAIStreamOutputState keeps the historical protocol boundary separate from
+// the first non-replayable model content boundary.  The former is still used
+// for EOF/missing-terminal compatibility; the latter gates OAuth capacity
+// failover only.
+type openAIStreamOutputState struct {
+	protocolOutputStarted        bool
+	semanticOutputStarted        bool
+	outputStartEventType         string
+	semanticOutputStartEventType string
+}
+
+func openAIStreamJSONValueHasContent(value gjson.Result) bool {
+	if !value.Exists() || value.Type == gjson.Null {
+		return false
+	}
+	if value.Type == gjson.String {
+		return value.String() != ""
+	}
+	raw := strings.TrimSpace(value.Raw)
+	return raw != "" && raw != "null" && raw != "{}" && raw != "[]"
+}
+
+// Semantic output is the conservative replay boundary. Known structural events
+// stay replayable; unknown events keep the historical fail-closed behavior.
+func openAIStreamDataStartsSemanticOutput(payload []byte, eventType string) bool {
+	trimmed := strings.TrimSpace(string(payload))
+	if trimmed == "" || trimmed == "[DONE]" {
+		return false
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" && gjson.ValidBytes(payload) {
+		eventType = strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	}
+	switch eventType {
+	case "keepalive", "response.created", "response.in_progress", "response.queued", "response.metadata",
+		"response.output_item.added", "response.content_part.added",
+		"response.reasoning_summary_part.added", "response.failed", "error":
+		return false
+	}
+	if strings.HasSuffix(eventType, ".delta") {
+		return openAIStreamJSONValueHasContent(gjson.GetBytes(payload, "delta"))
+	}
+	if strings.HasSuffix(eventType, ".partial_image") {
+		return openAIStreamJSONValueHasContent(gjson.GetBytes(payload, "partial_image_b64"))
+	}
+	return openAIStreamDataStartsClientOutput(trimmed, eventType)
+}
+
+func (s *openAIStreamOutputState) observe(payload []byte, eventType string) (bool, bool) {
+	if s == nil {
+		return false, false
+	}
+	protocolStarted := openAIStreamDataStartsClientOutput(string(payload), eventType)
+	semanticStarted := openAIStreamDataStartsSemanticOutput(payload, eventType)
+	resolvedEventType := strings.TrimSpace(eventType)
+	if resolvedEventType == "" && gjson.ValidBytes(payload) {
+		resolvedEventType = strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	}
+	if protocolStarted && !s.protocolOutputStarted {
+		s.protocolOutputStarted = true
+		s.outputStartEventType = resolvedEventType
+	}
+	if semanticStarted && !s.semanticOutputStarted {
+		s.semanticOutputStarted = true
+		s.semanticOutputStartEventType = resolvedEventType
+	}
+	return protocolStarted, semanticStarted
+}
+
 // openAIStreamFailedEventErrorCode 提取流内 failed 事件的错误码（小写），
 // 兼容 response.failed 的嵌套形态与裸 error 形态。
 func openAIStreamFailedEventErrorCode(payload []byte) string {
@@ -878,7 +938,7 @@ func openAIStreamFailedEventErrorCode(payload []byte) string {
 	return code
 }
 
-// isOpenAIUpstreamCapacityShedEvent 判断流内 failed 事件是否为上游容量降载信号。
+// isOpenAIUpstreamCapacityShedEvent 判断流内 error/failed 事件是否为上游容量降载信号。
 // 上游在容量紧张时会把请求丢进降载路径：HTTP 200 之后立刻推 event: error
 // （code=server_is_overloaded / slow_down）并以 response.failed 收尾。
 func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
@@ -890,39 +950,157 @@ func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
 	}
 }
 
-// openAICapacityShedRetryableClientCode 是把上游容量降载错误转发给客户端时改写
-// 使用的错误码。Codex CLI 按闭集对错误码分类：server_is_overloaded / slow_down
-// 被判为致命错误（客户端提示 "Selected model is at capacity. Please try a
-// different model." 并直接终止会话），而 server_error 等致命集之外的错误码会进入
-// 客户端内置的退避重试。
-const openAICapacityShedRetryableClientCode = "server_error"
+const (
+	openAIUpstreamOverloadMessage    = "Our servers are currently overloaded. Please try again later."
+	openAIOAuthCapacityClientMessage = "Upstream service is temporarily unavailable. Please retry."
+	openAIOAuthCapacityCooldown      = 2 * time.Minute
+)
 
-// sanitizeOpenAICapacityShedErrorCodeForClient 把即将写给下游客户端的
-// error / response.failed 事件中的容量降载错误码改写为客户端可重试的错误码。
-// 走到转发这一步说明网关侧 failover 已不可用（流中途）或已用尽；保留原始降载码
-// 只会让客户端就地终止会话。错误消息原样保留；监控与账号状态判定都基于改写前
-// 的原始 payload，不受影响。rate_limit 等其他错误码一律不动（客户端依赖
-// rate_limit_exceeded 原码解析重试延时）。
-func sanitizeOpenAICapacityShedErrorCodeForClient(payload []byte) ([]byte, bool) {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) || !isOpenAIUpstreamCapacityShedEvent(payload) {
+func OpenAIOAuthCapacityClientMessage() string {
+	return openAIOAuthCapacityClientMessage
+}
+
+func isOpenAIUpstreamCapacityMessage(message string) bool {
+	trimmed := strings.TrimSpace(message)
+	return strings.Contains(strings.ToLower(trimmed), "selected model is at capacity") ||
+		strings.EqualFold(trimmed, openAIUpstreamOverloadMessage)
+}
+
+func isOpenAIOAuthCapacityShedEvent(account *Account, payload []byte, message string) bool {
+	if !isOpenAIOAuthAccount(account) {
+		return false
+	}
+	if isOpenAIUpstreamCapacityShedEvent(payload) {
+		return true
+	}
+	if isOpenAIUpstreamCapacityMessage(message) {
+		return true
+	}
+	return isOpenAIUpstreamCapacityMessage(extractOpenAISSEErrorMessage(payload))
+}
+
+func sanitizeOpenAIOAuthCapacityEventForClient(account *Account, payload []byte, eventType string) ([]byte, bool) {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) ||
+		!isOpenAIOAuthCapacityShedEvent(account, payload, extractOpenAISSEErrorMessage(payload)) {
 		return payload, false
 	}
-	updated := payload
-	changed := false
-	for _, path := range []string{"response.error.code", "error.code"} {
-		switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(updated, path).String())) {
-		case "server_is_overloaded", "slow_down":
-		default:
-			continue
-		}
-		next, err := sjson.SetBytes(updated, path, openAICapacityShedRetryableClientCode)
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	}
+	if eventType != "error" && eventType != "response.failed" {
+		return payload, false
+	}
+
+	updated, err := sjson.SetBytes(payload, "type", "response.failed")
+	if err != nil {
+		return payload, false
+	}
+	if !gjson.GetBytes(updated, "response").IsObject() {
+		updated, err = sjson.SetBytes(updated, "response", map[string]any{})
 		if err != nil {
 			return payload, false
 		}
-		updated = next
-		changed = true
 	}
-	return updated, changed
+	updated, err = sjson.SetBytes(updated, "response.status", "failed")
+	if err != nil {
+		return payload, false
+	}
+	updated, err = sjson.SetBytes(updated, "response.error", map[string]string{
+		"type":    "server_error",
+		"code":    "server_error",
+		"message": openAIOAuthCapacityClientMessage,
+	})
+	if err != nil {
+		return payload, false
+	}
+	for _, path := range []string{"error", "message"} {
+		updated, err = sjson.DeleteBytes(updated, path)
+		if err != nil {
+			return payload, false
+		}
+	}
+	return updated, true
+}
+
+type accountOverloadExtender interface {
+	ExtendOverloaded(ctx context.Context, id int64, until time.Time) error
+}
+
+func (s *OpenAIGatewayService) markOpenAIOAuthCapacityOverloaded(ctx context.Context, account *Account) {
+	if s == nil || !isOpenAIOAuthAccount(account) {
+		return
+	}
+	until := time.Now().Add(openAIOAuthCapacityCooldown)
+	if account.OverloadUntil != nil && account.OverloadUntil.After(until) {
+		until = *account.OverloadUntil
+	}
+	// Match the existing 529 order: block this process immediately, then persist
+	// OverloadUntil so every scheduler instance and ops sees the same cooldown.
+	s.BlockAccountScheduling(account, until, "oauth_capacity")
+	if s.accountRepo == nil {
+		return
+	}
+	stateCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	extender, ok := s.accountRepo.(accountOverloadExtender)
+	if !ok {
+		logger.FromContext(ctx).Warn("openai.responses.oauth_capacity_account_cooldown_failed",
+			zap.Int64("account_id", account.ID),
+			zap.Time("overload_until", until),
+			zap.String("reason", "repository does not support monotonic overload extension"),
+		)
+		return
+	}
+	if err := extender.ExtendOverloaded(stateCtx, account.ID, until); err != nil {
+		logger.FromContext(ctx).Warn("openai.responses.oauth_capacity_account_cooldown_failed",
+			zap.Int64("account_id", account.ID),
+			zap.Time("overload_until", until),
+			zap.Error(err),
+		)
+		return
+	}
+	logger.FromContext(ctx).Info("openai.responses.oauth_capacity_account_cooldown",
+		zap.Int64("account_id", account.ID),
+		zap.Time("overload_until", until),
+		zap.Int64("cooldown_seconds", int64(openAIOAuthCapacityCooldown/time.Second)),
+	)
+}
+
+func logOpenAIOAuthCapacityDecision(
+	ctx context.Context,
+	account *Account,
+	payload []byte,
+	eventType string,
+	passthrough bool,
+	upstreamRequestID string,
+	clientOutputStarted bool,
+	outputState openAIStreamOutputState,
+) {
+	decision := "failover"
+	logMessage := "openai.responses.oauth_capacity_prewrite_failover"
+	if outputState.semanticOutputStarted {
+		decision = "rewrite_server_error"
+		logMessage = "openai.responses.oauth_capacity_postwrite_rewrite"
+	}
+	capacityMatch := "message"
+	if isOpenAIUpstreamCapacityShedEvent(payload) {
+		capacityMatch = "code"
+	}
+	logger.FromContext(ctx).With(
+		zap.Int64("account_id", account.ID),
+		zap.String("event_type", strings.TrimSpace(eventType)),
+		zap.String("capacity_code", truncateOpenAIWSLogValue(openAIStreamFailedEventErrorCode(payload), 120)),
+		zap.String("capacity_match", capacityMatch),
+		zap.Bool("client_output_started", clientOutputStarted),
+		zap.Bool("protocol_output_started", outputState.protocolOutputStarted),
+		zap.Bool("semantic_output_started", outputState.semanticOutputStarted),
+		zap.String("output_start_event_type", truncateOpenAIWSLogValue(outputState.outputStartEventType, 120)),
+		zap.String("semantic_output_start_event_type", truncateOpenAIWSLogValue(outputState.semanticOutputStartEventType, 120)),
+		zap.String("decision", decision),
+		zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
+		zap.Bool("passthrough", passthrough),
+	).Warn(logMessage)
 }
 
 func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
@@ -1083,12 +1261,8 @@ func openAIStreamFailedEventRetryableOnSameAccount(account *Account, payload []b
 	if account == nil {
 		return false
 	}
-	// 容量降载是请求级信号，不是账号级故障：上游只是让本次请求稍后再试。
-	// 换账号并不改变被降载的因素（客户端身份、模型容量都与账号无关），
-	// 只会让单个请求把整池账号逐个消耗掉，最终仍以同一个错误告终。
-	// 因此先在同一账号上做有界重试，用尽后才按常规流程切号。
 	if isOpenAIUpstreamCapacityShedEvent(payload) {
-		return true
+		return !isOpenAIOAuthAccount(account)
 	}
 	if !account.IsPoolMode() {
 		return false
@@ -1139,6 +1313,109 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 		appendOpsUpstreamError(c, event)
 	}
 	return message
+}
+
+// nonStreamingFailedEventFailover 判定 stream=false 场景下、承载于 HTTP 200 SSE 的
+// response.failed 终止事件应当切号，还是直接把错误回写给客户端。
+//
+// 同一个上游 capacity/限流错误此前在两条路径上行为不一致：流式路径经
+// openAIStreamFailedEventShouldFailover 判定后返回 UpstreamFailoverError 切号；
+// 而 stream=false 的 SSE→JSON 转换路径直接 writeOpenAINonStreamingProtocolError
+// 回写 502，池内还有可调度账号也不会切，并把上游原始文案暴露给最终用户。
+//
+// 这条路径上的响应体已被 ReadUpstreamResponseBody 完整缓冲，判定发生在任何
+// 语义响应写出之前，因此重放是安全的。与流式路径一致，本函数只拒绝已经写过
+// 语义响应的场景（IsResponseCommitted）；能否真正换号由 handler 仲裁——它用
+// OpenAICompactKeepaliveAdjustedWrittenSize 扣除 compact 心跳注释字节后，
+// 再判断 Forward 期间是否已写出响应（#3887）。
+//
+// 返回 nil 表示不切号，调用方继续走原有的错误回写逻辑。
+func (s *OpenAIGatewayService) nonStreamingFailedEventFailover(
+	c *gin.Context,
+	account *Account,
+	passthrough bool,
+	resp *http.Response,
+	payload []byte,
+	message string,
+) *UpstreamFailoverError {
+	if account == nil || resp == nil || c == nil {
+		return nil
+	}
+	// Keep the new non-streaming failover behavior scoped to OpenAI OAuth.
+	// API-key and other platform handlers retain their HEAD behavior.
+	if !isOpenAIOAuthAccount(account) {
+		return nil
+	}
+	capacity := isOpenAIOAuthCapacityShedEvent(account, payload, message)
+	if capacity {
+		requestCtx := context.Background()
+		if c.Request != nil {
+			requestCtx = c.Request.Context()
+		}
+		s.markOpenAIOAuthCapacityOverloaded(requestCtx, account)
+	}
+	if IsResponseCommitted(c) {
+		return nil
+	}
+	// Unlike the streaming classifier, the legacy non-streaming path did not
+	// fail over unknown response.failed events. Require a positive transient
+	// classification so this extension does not broaden that behavior.
+	if capacity {
+		return s.newOpenAIOAuthCapacityFailoverError(
+			c,
+			account,
+			passthrough,
+			resp.Header.Get("x-request-id"),
+			payload,
+			message,
+			resp.Header,
+		)
+	}
+	if openAIStreamFailureStatus(payload, message) != http.StatusTooManyRequests &&
+		!isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
+		return nil
+	}
+	return s.newOpenAIStreamFailoverError(
+		c,
+		account,
+		passthrough,
+		resp.Header.Get("x-request-id"),
+		payload,
+		message,
+		resp.Header,
+	)
+}
+
+func (s *OpenAIGatewayService) newOpenAIOAuthCapacityFailoverError(
+	c *gin.Context,
+	account *Account,
+	passthrough bool,
+	upstreamRequestID string,
+	payload []byte,
+	message string,
+	responseHeaders ...http.Header,
+) *UpstreamFailoverError {
+	failoverErr := s.newOpenAIStreamFailoverError(
+		c,
+		account,
+		passthrough,
+		upstreamRequestID,
+		payload,
+		message,
+		responseHeaders...,
+	)
+	failoverErr.RetryableOnSameAccount = false
+	failoverErr.RequestScopedTransient = true
+	failoverErr.OpenAIOAuthCapacity = true
+	if failoverErr.ResponseHeaders == nil {
+		failoverErr.ResponseHeaders = make(http.Header)
+	}
+	failoverErr.ResponseHeaders.Set("Retry-After", strconv.Itoa(int(openAIOAuthCapacityCooldown/time.Second)))
+	// Native stream keepalive comments may already have committed HTTP 200, but
+	// staged structural frames have not reached the client.  The handler may
+	// therefore continue with another account until semantic output begins.
+	failoverErr.SafeToFailoverAfterWrite = true
+	return failoverErr
 }
 
 func (s *OpenAIGatewayService) newOpenAIStreamFailoverError(
@@ -1195,7 +1472,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
-	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	semanticOutputGuard := isOpenAIOAuthAccount(account)
+	responseHeaderTarget := c.Writer.Header()
+	var attemptResponseHeaders http.Header
+	if semanticOutputGuard {
+		attemptResponseHeaders = make(http.Header)
+		responseHeaderTarget = attemptResponseHeaders
+	}
+	writeOpenAIPassthroughResponseHeaders(responseHeaderTarget, resp.Header, s.responseHeaderFilter)
 
 	// SSE headers
 	c.Header("Content-Type", "text/event-stream")
@@ -1203,7 +1487,22 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 	if v := resp.Header.Get("x-request-id"); v != "" {
-		c.Header("x-request-id", v)
+		responseHeaderTarget.Set("x-request-id", v)
+	}
+	applyAttemptResponseHeaders := func() {
+		if !semanticOutputGuard || len(attemptResponseHeaders) == 0 || c.Writer.Written() {
+			return
+		}
+		for key, values := range attemptResponseHeaders {
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
 	}
 
 	w := c.Writer
@@ -1223,7 +1522,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	semanticOutputSeen := false
 	failedMessage := ""
 	clientOutputStarted := false
+	var outputState openAIStreamOutputState
+	capacityAccountMarked := false
+	markCapacityAccount := func() {
+		if capacityAccountMarked {
+			return
+		}
+		capacityAccountMarked = true
+		s.markOpenAIOAuthCapacityOverloaded(ctx, account)
+	}
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	currentSSEEventType := ""
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
 	pendingLines := make([]string, 0, 8)
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
@@ -1246,6 +1555,19 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 		pendingLines = pendingLines[:0]
 		return true
+	}
+	flushProtocolOnlyOutput := func() {
+		if !semanticOutputGuard || outputState.semanticOutputStarted || !outputState.protocolOutputStarted ||
+			clientOutputStarted || clientDisconnected || len(pendingLines) == 0 {
+			return
+		}
+		applyAttemptResponseHeaders()
+		if !writePendingLines() {
+			return
+		}
+		clientOutputStarted = true
+		flushPending = true
+		flushPendingOutput()
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -1273,6 +1595,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		line := documentScanner.Text()
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
+		if eventType, ok := extractOpenAISSEEventLine(line); ok {
+			currentSSEEventType = eventType
+		}
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			trimmedData := strings.TrimSpace(data)
@@ -1307,6 +1632,27 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := strings.TrimSpace(gjson.Get(trimmedData, "type").String())
+			capacityEventType := eventType
+			if capacityEventType == "" {
+				capacityEventType = currentSSEEventType
+			}
+			if eventType != "response.failed" &&
+				(capacityEventType == "error" || capacityEventType == "response.failed") &&
+				isOpenAIOAuthCapacityShedEvent(account, dataBytes, extractOpenAISSEErrorMessage(dataBytes)) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, capacityEventType, true, upstreamRequestID, outputStarted, outputState)
+				markCapacityAccount()
+				if !outputState.semanticOutputStarted {
+					return resultWithUsage(),
+						s.newOpenAIOAuthCapacityFailoverError(c, account, true, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
+				}
+				if sanitizedData, sanitized := sanitizeOpenAIOAuthCapacityEventForClient(account, dataBytes, capacityEventType); sanitized {
+					dataBytes = sanitizedData
+					trimmedData = strings.TrimSpace(string(sanitizedData))
+					line = "data: " + string(sanitizedData)
+					eventType = strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
+				}
+			}
 			if eventType == "response.failed" {
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
 				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
@@ -1323,8 +1669,30 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				clientOutputWritten := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				outputStarted := clientOutputWritten
+				if isOpenAIOAuthAccount(account) {
+					// Ordinary response.failed keeps HEAD's protocol boundary. Only
+					// capacity decisions use the stricter semantic boundary below.
+					outputStarted = outputStarted || outputState.protocolOutputStarted
+				}
+				if isOpenAIOAuthCapacityShedEvent(account, dataBytes, failedMessage) {
+					logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, eventType, true, upstreamRequestID, clientOutputWritten, outputState)
+					markCapacityAccount()
+					if !outputState.semanticOutputStarted {
+						return resultWithUsage(),
+							s.newOpenAIOAuthCapacityFailoverError(c, account, true, upstreamRequestID, dataBytes, failedMessage, resp.Header)
+					}
+					if sanitizedData, sanitized := sanitizeOpenAIOAuthCapacityEventForClient(account, dataBytes, eventType); sanitized {
+						dataBytes = sanitizedData
+						trimmedData = strings.TrimSpace(string(sanitizedData))
+						line = "data: " + string(sanitizedData)
+						failedMessage = openAIOAuthCapacityClientMessage
+					}
+				}
+				if !outputStarted {
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
+						applyAttemptResponseHeaders()
 						// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
 						// antigravity 先例），否则透传命中的 failed 在监控中不可见。
 						s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID, "http_error", dataBytes, failedMessage)
@@ -1365,8 +1733,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				trimmedData = strings.TrimSpace(string(sanitizedData))
 				line = "data: " + string(sanitizedData)
 			}
+			outputEventType := eventType
+			if outputEventType == "" {
+				outputEventType = currentSSEEventType
+			}
+			_, startsSemanticOutput := outputState.observe(dataBytes, outputEventType)
 			lineStartsClientOutput = forceFlushFailedEvent || openAIStreamDataStartsClientOutput(trimmedData, eventType)
-			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
+			outputSeen := lineStartsClientOutput
+			if semanticOutputGuard {
+				outputSeen = forceFlushFailedEvent || startsSemanticOutput
+			}
+			if outputSeen && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
 				semanticOutputSeen = true
 			}
 			// OpenAI Responses streams that terminate with an empty
@@ -1378,17 +1755,26 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				openAIResponsesCompletedEventIsEmpty(dataBytes, usage) {
 				return resultWithUsage(), newOpenAIResponsesEmptyCompletedFailoverError(c, account, upstreamRequestID)
 			}
+			if semanticOutputGuard {
+				lineStartsClientOutput = forceFlushFailedEvent || startsSemanticOutput
+			}
 			if firstTokenMs == nil && openAIStreamDataStartsVisibleOutput(trimmedData, eventType) {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 			}
 			s.parseSSEUsageBytes(dataBytes, usage)
 		}
+		if line == "" {
+			currentSSEEventType = ""
+		}
 
 		if !clientDisconnected {
 			if !clientOutputStarted && !lineStartsClientOutput {
 				pendingLines = append(pendingLines, line)
 				continue
+			}
+			if !clientOutputStarted {
+				applyAttemptResponseHeaders()
 			}
 			if !clientOutputStarted && len(pendingLines) > 0 {
 				if !writePendingLines() {
@@ -1407,6 +1793,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			}
 		}
 	}
+	// Preserve HEAD's structural-event EOF/error behavior: once the old protocol
+	// boundary was observed, flush the staged frames and return the ordinary
+	// missing-terminal/read-error path instead of creating a new failover.
+	flushProtocolOnlyOutput()
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account)
@@ -1469,6 +1859,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	ctx context.Context,
 	resp *http.Response,
 	c *gin.Context,
+	account *Account,
 	originalModel string,
 	mappedModel string,
 ) (*openaiNonStreamingResultPassthrough, error) {
@@ -1491,7 +1882,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	// stream=false was requested. Without this conversion the client would
 	// receive raw SSE text or a terminal event with empty output.
 	if isEventStreamResponse(resp.Header) {
-		return s.handlePassthroughSSEToJSON(resp, c, body, originalModel, mappedModel)
+		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
 	}
 
 	usage := &OpenAIUsage{}
@@ -1536,7 +1927,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // response for the passthrough path. It mirrors handleSSEToJSON while
 // preserving passthrough payloads, except compact-only model remapping may
 // rewrite model fields back to the original requested model.
-func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
+func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
 	bodyText := string(body)
 	finalResponse, ok := extractCodexFinalResponse(bodyText)
 
@@ -1568,12 +1959,26 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		body = restoredBody
 	} else {
 		terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
-		if terminalOK && terminalType == "response.failed" {
+		if !terminalOK {
+			if capacityPayload, capacityOK := extractOpenAIOAuthCapacitySSEEvent(account, bodyText); capacityOK {
+				terminalType, terminalPayload, terminalOK = "error", capacityPayload, true
+			}
+		}
+		if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
 			msg := extractOpenAISSEErrorMessage(terminalPayload)
 			if msg == "" {
 				msg = "Upstream compact response failed"
 			}
-			return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
+			// 与流式 passthrough 路径采用同一套判定，见 nonStreamingFailedEventFailover。
+			if failoverErr := s.nonStreamingFailedEventFailover(c, account, true, resp, terminalPayload, msg); failoverErr != nil {
+				return nil, failoverErr
+			}
+			errType := "upstream_error"
+			if isOpenAIOAuthCapacityShedEvent(account, terminalPayload, msg) {
+				errType = "server_error"
+				msg = openAIOAuthCapacityClientMessage
+			}
+			return nil, s.writeOpenAINonStreamingProtocolError(resp, c, errType, msg)
 		}
 		usage = s.parseSSEUsageFromBody(bodyText)
 		if originalModel != "" && mappedModel != "" && originalModel != mappedModel {

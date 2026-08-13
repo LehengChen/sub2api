@@ -16,7 +16,7 @@ import (
 const grokDefaultAccessTokenTTL = 6 * time.Hour
 
 type GrokOAuthService struct {
-	sessionStore *xai.SessionStore
+	sessionStore OAuthSessionStore
 	proxyRepo    ProxyRepository
 	oauthClient  GrokOAuthClient
 	config       *config.Config
@@ -24,7 +24,7 @@ type GrokOAuthService struct {
 
 func NewGrokOAuthService(proxyRepo ProxyRepository, oauthClient GrokOAuthClient, configs ...*config.Config) *GrokOAuthService {
 	service := &GrokOAuthService{
-		sessionStore: xai.NewSessionStore(),
+		sessionStore: NewMemoryOAuthSessionStore(),
 		proxyRepo:    proxyRepo,
 		oauthClient:  oauthClient,
 	}
@@ -32,19 +32,6 @@ func NewGrokOAuthService(proxyRepo ProxyRepository, oauthClient GrokOAuthClient,
 		service.config = configs[0]
 	}
 	return service
-}
-
-// WithSessionStore replaces the in-memory OAuth session store (e.g. Redis-backed
-// for cross-instance single-use callbacks). Redis wiring stays in Wire providers
-// so this service package does not import go-redis (depguard).
-func (s *GrokOAuthService) WithSessionStore(store *xai.SessionStore) *GrokOAuthService {
-	if s != nil && store != nil {
-		if s.sessionStore != nil {
-			s.sessionStore.Stop()
-		}
-		s.sessionStore = store
-	}
-	return s
 }
 
 type GrokOAuthCapabilities struct {
@@ -57,6 +44,23 @@ func (s *GrokOAuthService) GetCapabilities() GrokOAuthCapabilities {
 
 func (s *GrokOAuthService) passwordAuthEnabled() bool {
 	return s.config != nil && s.config.Gateway.Grok.PasswordAuthEnabled
+}
+
+// NewGrokOAuthServiceWithSessionStore creates a Grok OAuth service using a
+// caller-provided store. Multi-instance deployments must inject a shared store.
+func NewGrokOAuthServiceWithSessionStore(proxyRepo ProxyRepository, oauthClient GrokOAuthClient, sessionStore OAuthSessionStore, configs ...*config.Config) (*GrokOAuthService, error) {
+	if sessionStore == nil {
+		return nil, errors.New("oauth session store is required")
+	}
+	service := &GrokOAuthService{
+		sessionStore: sessionStore,
+		proxyRepo:    proxyRepo,
+		oauthClient:  oauthClient,
+	}
+	if len(configs) > 0 {
+		service.config = configs[0]
+	}
+	return service, nil
 }
 
 type GrokAuthURLResult struct {
@@ -95,7 +99,7 @@ func (s *GrokOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64, 
 		return nil, infraerrors.Newf(http.StatusBadRequest, "GROK_OAUTH_INVALID_AUTHORIZE_URL", "%v", err)
 	}
 
-	s.sessionStore.Set(sessionID, &xai.OAuthSession{
+	if err := s.sessionStore.Save(ctx, OAuthSessionProviderGrok, sessionID, &xai.OAuthSession{
 		State:         state,
 		CodeVerifier:  codeVerifier,
 		CodeChallenge: codeChallenge,
@@ -104,7 +108,9 @@ func (s *GrokOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64, 
 		ProxyURL:      proxyURL,
 		RedirectURI:   redirectURI,
 		CreatedAt:     time.Now(),
-	})
+	}, xai.SessionTTL); err != nil {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "GROK_OAUTH_SESSION_STORE_UNAVAILABLE", "oauth session store unavailable")
+	}
 
 	return &GrokAuthURLResult{
 		AuthURL:   authURL,
@@ -148,9 +154,11 @@ func (s *GrokOAuthService) ExchangeCode(ctx context.Context, input *GrokExchange
 	if input == nil {
 		return nil, infraerrors.New(http.StatusBadRequest, "GROK_OAUTH_INVALID_INPUT", "input is required")
 	}
-	session, ok := s.sessionStore.Get(input.SessionID)
-	if !ok {
+	var session xai.OAuthSession
+	if err := s.sessionStore.Load(ctx, OAuthSessionProviderGrok, input.SessionID, &session); errors.Is(err, ErrOAuthSessionNotFound) {
 		return nil, infraerrors.New(http.StatusBadRequest, "GROK_OAUTH_SESSION_NOT_FOUND", "session not found or expired")
+	} else if err != nil {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "GROK_OAUTH_SESSION_STORE_UNAVAILABLE", "oauth session store unavailable")
 	}
 
 	parsed := xai.ParseAuthorizationInput(input.Code)
@@ -184,18 +192,20 @@ func (s *GrokOAuthService) ExchangeCode(ctx context.Context, input *GrokExchange
 	if err := s.requireOAuthClient(); err != nil {
 		return nil, err
 	}
-	if !s.sessionStore.TryConsumeSession(input.SessionID) {
-		return nil, infraerrors.New(http.StatusBadRequest, "GROK_OAUTH_SESSION_ALREADY_USED", "oauth session has already been used")
+	var consumedSession xai.OAuthSession
+	if err := s.sessionStore.Consume(ctx, OAuthSessionProviderGrok, input.SessionID, &consumedSession); errors.Is(err, ErrOAuthSessionNotFound) {
+		return nil, infraerrors.New(http.StatusBadRequest, "GROK_OAUTH_SESSION_NOT_FOUND", "session not found or expired")
+	} else if err != nil {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "GROK_OAUTH_SESSION_STORE_UNAVAILABLE", "oauth session store unavailable")
 	}
-	defer s.sessionStore.Delete(input.SessionID)
-	tokenResp, err := s.oauthClient.ExchangeCode(ctx, code, session.CodeVerifier, session.RedirectURI, proxyURL, session.ClientID)
+	tokenResp, err := s.oauthClient.ExchangeCode(ctx, code, consumedSession.CodeVerifier, consumedSession.RedirectURI, proxyURL, consumedSession.ClientID)
 	if err != nil {
 		return nil, err
 	}
 	if err := validateGrokTokenResponse(tokenResp); err != nil {
 		return nil, err
 	}
-	return s.tokenInfoFromResponse(tokenResp, session.ClientID, nil), nil
+	return s.tokenInfoFromResponse(tokenResp, consumedSession.ClientID, nil), nil
 }
 
 func (s *GrokOAuthService) requireOAuthClient() error {
@@ -379,7 +389,7 @@ func (s *GrokOAuthService) BuildAccountCredentials(tokenInfo *GrokTokenInfo) map
 }
 
 func (s *GrokOAuthService) Stop() {
-	s.sessionStore.Stop()
+	_ = s.sessionStore.Close()
 }
 
 func (s *GrokOAuthService) tokenInfoFromResponse(tokenResp *xai.TokenResponse, clientID string, existing map[string]any) *GrokTokenInfo {

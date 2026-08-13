@@ -57,6 +57,41 @@ func ensureBootstrapSecrets(ctx context.Context, client *ent.Client, cfg *config
 	return nil
 }
 
+// loadBootstrapSecretsReadOnly resolves the persisted JWT secret without
+// creating or updating database rows. Explicit runtime roles use this path so
+// API, worker, and standby startup cannot perform hidden bootstrap writes.
+func loadBootstrapSecretsReadOnly(ctx context.Context, client *ent.Client, cfg *config.Config) error {
+	if client == nil {
+		return fmt.Errorf("nil ent client")
+	}
+	if cfg == nil {
+		return fmt.Errorf("nil config")
+	}
+
+	configured := strings.TrimSpace(cfg.JWT.Secret)
+	stored, err := client.SecuritySecret.Query().Where(securitysecret.KeyEQ(securitySecretKeyJWT)).Only(ctx)
+	if err != nil {
+		if !ent.IsNotFound(err) {
+			return fmt.Errorf("read persisted jwt secret: %w", err)
+		}
+		if len([]byte(configured)) < 32 {
+			return fmt.Errorf("persisted jwt secret is required for explicit runtime roles")
+		}
+		cfg.JWT.Secret = configured
+		return nil
+	}
+
+	value := strings.TrimSpace(stored.Value)
+	if len([]byte(value)) < 32 {
+		return fmt.Errorf("stored secret %q must be at least 32 bytes", securitySecretKeyJWT)
+	}
+	if configured != "" && configured != value {
+		log.Println("Warning: configured JWT secret mismatches persisted value; using persisted secret for cross-instance consistency.")
+	}
+	cfg.JWT.Secret = value
+	return nil
+}
+
 func getOrCreateGeneratedSecuritySecret(ctx context.Context, client *ent.Client, key string, byteLength int) (string, bool, error) {
 	existing, err := client.SecuritySecret.Query().Where(securitysecret.KeyEQ(key)).Only(ctx)
 	if err == nil {

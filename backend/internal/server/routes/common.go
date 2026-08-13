@@ -7,11 +7,12 @@ import (
 )
 
 // RegisterCommonRoutes 注册通用路由（健康检查、状态等）
-func RegisterCommonRoutes(r *gin.Engine) {
-	// 健康检查
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+func RegisterCommonRoutes(r *gin.Engine, livenessHandler, readinessHandler gin.HandlerFunc) {
+	// /health remains a liveness alias for backward compatibility. Load
+	// balancers should use /readyz when deciding whether to send real traffic.
+	r.GET("/health", livenessHandler)
+	r.GET("/livez", livenessHandler)
+	r.GET("/readyz", readinessHandler)
 
 	// Claude Code 遥测日志（忽略，直接返回200）
 	r.POST("/api/event_logging/batch", func(c *gin.Context) {

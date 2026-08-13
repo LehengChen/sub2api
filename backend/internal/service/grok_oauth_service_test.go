@@ -120,8 +120,8 @@ func TestGrokOAuthServiceExchangeCodeRejectsMissingClientWithoutConsumingSession
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "GROK_OAUTH_CLIENT_NOT_CONFIGURED")
-	_, ok := svc.sessionStore.Get(auth.SessionID)
-	require.True(t, ok)
+	var session xai.OAuthSession
+	require.NoError(t, svc.sessionStore.Load(context.Background(), OAuthSessionProviderGrok, auth.SessionID, &session))
 }
 
 func TestGrokOAuthServiceExchangeCodeRequiresStateForBareCode(t *testing.T) {
@@ -138,8 +138,8 @@ func TestGrokOAuthServiceExchangeCodeRequiresStateForBareCode(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "GROK_OAUTH_STATE_REQUIRED")
 	require.Zero(t, client.exchangeCalls)
-	_, ok := svc.sessionStore.Get(auth.SessionID)
-	require.True(t, ok)
+	var session xai.OAuthSession
+	require.NoError(t, svc.sessionStore.Load(context.Background(), OAuthSessionProviderGrok, auth.SessionID, &session))
 }
 
 func TestGrokOAuthServiceExchangeCodeRejectsRedirectURIOverride(t *testing.T) {

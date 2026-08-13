@@ -364,6 +364,8 @@ func (h *OpsHandler) QPSWSHandler(c *gin.Context) {
 		logger.LegacyPrintf("handler.admin.ops_ws", "[OpsWS] upgrade failed: %v", err)
 		return
 	}
+	releaseDrainRegistration := servermiddleware.RegisterLongLivedConnection(c, conn.Close)
+	defer releaseDrainRegistration()
 
 	defer func() {
 		_ = conn.Close()
