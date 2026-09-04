@@ -84,6 +84,13 @@ type accountWindowStatsBatchReader interface {
 	GetAccountWindowStatsBatch(ctx context.Context, accountIDs []int64, startTime time.Time) (map[int64]*usagestats.AccountStats, error)
 }
 
+// accountWindowStatsByStartBatchReader is an optional repository capability used
+// by the admin usage batch path. Unlike GetAccountWindowStatsBatch, it preserves
+// each account's own rolling-window start time while still using one SQL query.
+type accountWindowStatsByStartBatchReader interface {
+	GetAccountWindowStatsBatchByStartTimes(ctx context.Context, starts map[int64]time.Time) (map[int64]*usagestats.AccountStats, error)
+}
+
 // apiUsageCache 缓存从 Anthropic API 获取的使用率数据（utilization, resets_at）
 // 同时支持缓存错误响应（负缓存），防止 429 等错误导致的重试风暴
 type apiUsageCache struct {
@@ -105,14 +112,18 @@ type antigravityUsageCache struct {
 }
 
 const (
-	apiCacheTTL         = 3 * time.Minute
-	apiErrorCacheTTL    = 1 * time.Minute        // 负缓存 TTL：429 等错误缓存 1 分钟
-	antigravityErrorTTL = 1 * time.Minute        // Antigravity 错误缓存 TTL（可恢复错误）
-	apiQueryMaxJitter   = 800 * time.Millisecond // 用量查询最大随机延迟
-	windowStatsCacheTTL = 1 * time.Minute
-	openAIProbeCacheTTL = 10 * time.Minute
-	grokProbeRetryTTL   = 1 * time.Minute
-	grokFreeQuotaWindow = 24 * time.Hour
+	apiCacheTTL                         = 3 * time.Minute
+	apiErrorCacheTTL                    = 1 * time.Minute        // 负缓存 TTL：429 等错误缓存 1 分钟
+	antigravityErrorTTL                 = 1 * time.Minute        // Antigravity 错误缓存 TTL（可恢复错误）
+	apiQueryMaxJitter                   = 800 * time.Millisecond // 用量查询最大随机延迟
+	windowStatsCacheTTL                 = 1 * time.Minute
+	accountUsageBatchStatsSlowThreshold = 1 * time.Second
+	accountUsageBatchStatsTimeout       = 5 * time.Second
+	accountUsageBatchProbeTimeout       = 5 * time.Second
+	openAIProbeCacheTTL                 = 10 * time.Minute
+	grokProbeRetryTTL                   = 1 * time.Minute
+	grokFreeQuotaWindow                 = 24 * time.Hour
+	openAICodexProbeVersion             = codexCLIVersion // 与网关出站身份同源，避免两处硬编码版本各自漂移
 )
 
 // UsageCache 封装账户使用量相关的缓存
@@ -338,6 +349,10 @@ func supportsAnthropicPassiveUsage(account *Account) bool {
 	return account != nil && account.IsAnthropicOAuthOrSetupToken()
 }
 
+func isOpenAIOAuthUsageAccount(account *Account) bool {
+	return account != nil && account.IsOpenAIOAuth()
+}
+
 func batchUsageErrorMessage(err error) string {
 	if err == nil {
 		return ""
@@ -346,6 +361,10 @@ func batchUsageErrorMessage(err error) string {
 }
 
 func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *Account, forceProbe bool) (*UsageInfo, error) {
+	return s.getUsageForAccountWithWindowStats(ctx, account, forceProbe, true)
+}
+
+func (s *AccountUsageService) getUsageForAccountWithWindowStats(ctx context.Context, account *Account, forceProbe, includeWindowStats bool) (*UsageInfo, error) {
 	if account == nil {
 		return nil, fmt.Errorf("account is required")
 	}
@@ -358,8 +377,8 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		return s.getPassiveUsageForAccount(ctx, account)
 	}
 
-	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
-		usage, err := s.getOpenAIUsage(ctx, account, forceProbe)
+	if isOpenAIOAuthUsageAccount(account) {
+		usage, err := s.getOpenAIUsageWithWindowStats(ctx, account, forceProbe, includeWindowStats)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
@@ -532,6 +551,17 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 	if len(uniqueIDs) == 0 {
 		return usageByAccount, errorsByAccount, nil
 	}
+	batchStartedAt := time.Now()
+	defer func() {
+		if elapsed := time.Since(batchStartedAt); elapsed >= accountUsageBatchStatsSlowThreshold {
+			slog.Warn("admin_account_usage_batch_slow",
+				"account_count", len(uniqueIDs),
+				"error_count", len(errorsByAccount),
+				"force", force,
+				"duration_ms", elapsed.Milliseconds(),
+			)
+		}
+	}()
 
 	accounts, err := s.accountRepo.GetByIDs(ctx, uniqueIDs)
 	if err != nil {
@@ -559,12 +589,23 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 		}
 
 		g.Go(func() error {
+			accountCtx := gctx
+			cancelAccount := func() {}
+			if isOpenAIOAuthUsageAccount(account) {
+				accountCtx, cancelAccount = context.WithTimeout(gctx, accountUsageBatchProbeTimeout)
+			}
+			defer cancelAccount()
+
 			var usage *UsageInfo
 			var usageErr error
 			if supportsAnthropicPassiveUsage(account) {
-				usage, usageErr = s.getPassiveUsageForAccount(gctx, account)
+				usage, usageErr = s.getPassiveUsageForAccount(accountCtx, account)
 			} else {
-				usage, usageErr = s.getUsageForAccount(gctx, account, force)
+				// OpenAI OAuth quota snapshots are independent of the local
+				// usage-log windows. Defer those two SQL aggregations until all
+				// accounts are collected so the batch can use set-based reads.
+				includeWindowStats := !isOpenAIOAuthUsageAccount(account)
+				usage, usageErr = s.getUsageForAccountWithWindowStats(accountCtx, account, force, includeWindowStats)
 			}
 
 			mu.Lock()
@@ -582,7 +623,155 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 		return nil, nil, err
 	}
 
+	s.addOpenAIBatchWindowStats(ctx, accountsByID, usageByAccount)
+
 	return usageByAccount, errorsByAccount, nil
+}
+
+type openAIUsageWindowSpec struct {
+	name     string
+	duration time.Duration
+	get      func(*UsageInfo) *UsageProgress
+	set      func(*UsageInfo, *UsageProgress)
+}
+
+// addOpenAIBatchWindowStats attaches local request/token totals to the OpenAI
+// quota snapshots returned by GetUsageBatch. The quota reset time is account
+// specific, so the repository method accepts one start time per account.
+func (s *AccountUsageService) addOpenAIBatchWindowStats(ctx context.Context, accounts map[int64]*Account, usages map[int64]*UsageInfo) {
+	if s == nil || s.usageLogRepo == nil || len(usages) == 0 {
+		return
+	}
+
+	now := time.Now()
+	statsCtx, cancel := context.WithTimeout(ctx, accountUsageBatchStatsTimeout)
+	defer cancel()
+	windows := []openAIUsageWindowSpec{
+		{
+			name:     "5h",
+			duration: 5 * time.Hour,
+			get:      func(usage *UsageInfo) *UsageProgress { return usage.FiveHour },
+			set: func(usage *UsageInfo, progress *UsageProgress) {
+				usage.FiveHour = progress
+			},
+		},
+		{
+			name:     "7d",
+			duration: 7 * 24 * time.Hour,
+			get:      func(usage *UsageInfo) *UsageProgress { return usage.SevenDay },
+			set: func(usage *UsageInfo, progress *UsageProgress) {
+				usage.SevenDay = progress
+			},
+		},
+	}
+
+	for _, window := range windows {
+		if statsCtx.Err() != nil {
+			break
+		}
+		starts := make(map[int64]time.Time, len(usages))
+		for accountID, usage := range usages {
+			if !isOpenAIOAuthUsageAccount(accounts[accountID]) || usage == nil {
+				continue
+			}
+			starts[accountID] = codexWindowStatsStart(window.get(usage), window.duration, now)
+		}
+		if len(starts) == 0 {
+			continue
+		}
+
+		startedAt := time.Now()
+		statsByAccount, err := s.queryAccountWindowStatsBatchByStartTimes(statsCtx, starts)
+		elapsed := time.Since(startedAt)
+		if err != nil || elapsed >= accountUsageBatchStatsSlowThreshold {
+			slog.Warn("admin_account_usage_window_stats",
+				"window", window.name,
+				"account_count", len(starts),
+				"timeout_ms", accountUsageBatchStatsTimeout.Milliseconds(),
+				"probe_timeout_ms", accountUsageBatchProbeTimeout.Milliseconds(),
+				"duration_ms", elapsed.Milliseconds(),
+				"error", err,
+			)
+		}
+		if err != nil && len(statsByAccount) == 0 {
+			continue
+		}
+
+		for accountID := range starts {
+			usage := usages[accountID]
+			stats, ok := statsByAccount[accountID]
+			if !ok {
+				continue
+			}
+			progress := window.get(usage)
+			if progress == nil {
+				progress = &UsageProgress{Utilization: 0}
+				window.set(usage, progress)
+			}
+			progress.WindowStats = windowStatsFromAccountStats(stats)
+		}
+	}
+}
+
+// queryAccountWindowStatsBatchByStartTimes prefers the set-based repository
+// query. The fallbacks keep older repository implementations and lightweight
+// test doubles compatible without changing the public repository interface.
+func (s *AccountUsageService) queryAccountWindowStatsBatchByStartTimes(ctx context.Context, starts map[int64]time.Time) (map[int64]*usagestats.AccountStats, error) {
+	result := make(map[int64]*usagestats.AccountStats, len(starts))
+	if len(starts) == 0 {
+		return result, nil
+	}
+
+	if batchReader, ok := s.usageLogRepo.(accountWindowStatsByStartBatchReader); ok {
+		statsByAccount, err := batchReader.GetAccountWindowStatsBatchByStartTimes(ctx, starts)
+		if err != nil {
+			return nil, err
+		}
+		if statsByAccount == nil {
+			statsByAccount = make(map[int64]*usagestats.AccountStats, len(starts))
+		}
+		for accountID := range starts {
+			if _, exists := statsByAccount[accountID]; !exists {
+				statsByAccount[accountID] = &usagestats.AccountStats{}
+			}
+		}
+		return statsByAccount, nil
+	}
+
+	// Last-resort compatibility path for repositories that predate the batch
+	// reader. Keep the old concurrency limit rather than serializing the page.
+	var mu sync.Mutex
+	var errMu sync.Mutex
+	var firstErr error
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8)
+	for accountID, start := range starts {
+		id, windowStart := accountID, start
+		g.Go(func() error {
+			stats, err := s.usageLogRepo.GetAccountWindowStats(gctx, id, windowStart)
+			if err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+				return nil
+			}
+			mu.Lock()
+			result[id] = stats
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+	if firstErr == nil {
+		for accountID := range starts {
+			if _, exists := result[accountID]; !exists {
+				result[accountID] = &usagestats.AccountStats{}
+			}
+		}
+	}
+	return result, firstErr
 }
 
 // GetPassiveUsage 从 Account.Extra 中的被动采样数据构建 UsageInfo，不调用外部 API。
@@ -709,6 +898,10 @@ func (s *AccountUsageService) syncActiveToPassive(ctx context.Context, accountID
 }
 
 func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
+	return s.getOpenAIUsageWithWindowStats(ctx, account, force, true)
+}
+
+func (s *AccountUsageService) getOpenAIUsageWithWindowStats(ctx context.Context, account *Account, force, includeWindowStats bool) (*UsageInfo, error) {
 	now := time.Now()
 	usage := &UsageInfo{UpdatedAt: &now}
 
@@ -750,7 +943,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		}
 	}
 
-	if s.usageLogRepo == nil {
+	if !includeWindowStats || s.usageLogRepo == nil {
 		return usage, nil
 	}
 
