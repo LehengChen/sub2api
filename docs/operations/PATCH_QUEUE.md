@@ -61,7 +61,7 @@ stable_patch_ids:
 last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
-- Exit and quality probes remain HTTPS-only. Upstream v0.1.177 still uses the
+- Exit and quality probes remain HTTPS-only. Upstream v0.2.0 still uses the
   HTTP targets without this patch; the code and focused tests applied cleanly.
 
 ## FZ-002: isolated offline pricing
@@ -105,12 +105,12 @@ stable_patch_ids:
 last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
-- Recalculated on the v0.1.177 module graphs: `golang.org/x/image` is 0.43.0,
+- Recalculated on the v0.2.0 module graph: `golang.org/x/image` is 0.45.0,
   OpenTelemetry core/metric/sdk/trace are 1.44.0, and the frontend uses
   `@e965/xlsx` 0.20.3 instead of `xlsx` 0.18.5. The obsolete explicit Wire
   tool requirement is dropped; upstream's readonly generator checksums remain.
 - Non-transactional migrations 175a and 190 drop an invalid concurrent index
-  before retrying, while v0.1.177 migrations 222/223 remain preserved.
+  before retrying, while the v0.2.0 migrations 222/223 remain preserved.
 - Dependency audit, unit tests, and image scanning must be rerun for the final
   candidate; old v0.1.172 scan results are not evidence for this release.
 
@@ -130,7 +130,7 @@ last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
 - Externally managed deployments expose read-only version health but disable
-  in-application update, rollback, and restart controls. The v0.1.177 Wire
+  in-application update, rollback, and restart controls. The v0.2.0 Wire
   graph was regenerated rather than copying the old generated file.
 
 ## FZ-005: readiness and bounded drain
@@ -171,7 +171,7 @@ last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
 - Claude, OpenAI, Grok, Gemini, and Antigravity OAuth state is injected through
-  the fail-closed Redis session store. The v0.1.177 Grok password/SSO and token
+  the fail-closed Redis session store. The v0.2.0 Grok password/SSO and token
   validation behavior is retained while its session lifecycle uses the shared
   store; memory stores remain limited to direct/test constructors.
 
@@ -194,7 +194,7 @@ last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 
 - Explicit active/api/worker/standby/migrator roles, Redis worker lease and
   readiness fencing, migration-only startup, and inert standby providers are
-  carried. The v0.1.177 Channel Monitor runner and V2 aggregator are also
+  carried. The v0.2.0 Channel Monitor runner and V2 aggregator are also
   fenced, and shutdown cleans workers before releasing the runtime lease.
 - This preserves manual cold standby. It does not approve active-active or
   automatic failover; critical write fencing still requires separate proof.
@@ -214,7 +214,7 @@ last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
 - Every redirect hop revalidates scheme, host allowlist, userinfo, port, and
-  private DNS resolution. v0.1.177 transport behavior is preserved.
+  private DNS resolution. v0.2.0 transport behavior is preserved.
 
 ## FZ-009: pinned container build inputs
 
@@ -229,9 +229,10 @@ stable_patch_ids:
 last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
-- Dockerfile frontend, Node 24, Go 1.26.6, Alpine 3.20/3.21, PostgreSQL 18,
-  and pnpm 9.15.9 inputs are pinned. On 2026-08-16 the Go 1.26.6 index
-  resolved by digest and exposed linux/amd64 and linux/arm64 manifests.
+- Dockerfile frontend, Node 24, Go 1.27.0, Alpine 3.21, PostgreSQL 18, and
+  pnpm 9.15.9 inputs are pinned. The Go 1.27.0 builder digest is fixed in the
+  candidate Dockerfile; the final multi-arch manifest still requires a release
+  build-time resolution check.
 - Manifest resolution is not an image vulnerability scan or provenance
   approval. The final application image must still be built once, identified
   by digest, scanned, and rehearsed on the standby center before promotion.
@@ -313,7 +314,7 @@ status: reimplement
 last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 ```
 
-- The v0.1.177 tree carries the FZ-005 lifecycle handlers, but its embedded
+- The v0.2.0 tree carries the FZ-005 lifecycle handlers, but its embedded
   frontend middleware does not bypass `/livez` or `/readyz`; those paths then
   receive the SPA document instead of the JSON health routes.
 - This two-line compatibility fix is required for the existing readiness and
