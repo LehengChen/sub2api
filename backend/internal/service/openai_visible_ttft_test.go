@@ -120,7 +120,14 @@ func TestOpenAIResponsesTTFTDefaultsToSemanticOutput(t *testing.T) {
 	}
 }
 
-func runSyntheticVisibleTTFTStream(t *testing.T, passthrough bool, visibleDelay time.Duration, timeoutSeconds int, ttftMode string, visibleEvent string) *openaiStreamingResult {
+func TestOpenAIOAuthNativeProgressDisarmsTimeoutUntilSemanticOutput(t *testing.T) {
+	result := runSyntheticVisibleTTFTStream(t, false, 1200*time.Millisecond, 1, "",
+		`{"type":"response.output_text.delta","delta":"test output"}`, AccountTypeOAuth)
+	require.NotNil(t, result.firstTokenMs)
+	require.GreaterOrEqual(t, *result.firstTokenMs, 1100)
+}
+
+func runSyntheticVisibleTTFTStream(t *testing.T, passthrough bool, visibleDelay time.Duration, timeoutSeconds int, ttftMode string, visibleEvent string, accountTypes ...string) *openaiStreamingResult {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	mode := ttftMode
@@ -152,6 +159,9 @@ func runSyntheticVisibleTTFTStream(t *testing.T, passthrough bool, visibleDelay 
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: reader}
 	account := &Account{ID: 1, Name: "account_test", Platform: PlatformOpenAI}
+	if len(accountTypes) > 0 {
+		account.Type = accountTypes[0]
+	}
 	started := time.Now()
 
 	var result *openaiStreamingResult

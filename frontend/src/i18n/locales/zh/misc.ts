@@ -55,7 +55,20 @@ export default {
     deployScript: '脚本部署',
     deployDocker: 'Docker',
     dockerEditCompose: '修改 docker-compose.yml 中的镜像版本',
-    dockerRecreate: '重新创建容器'
+    dockerRecreate: '重新创建容器',
+    externallyManaged: '由外部运维管理',
+    externallyManagedHint: '更新、回退和重启由经过批准的外部发布流水线控制。',
+    checkWarning: '版本状态警告',
+    checkFailed: '无法核验版本状态',
+    statusUnverified: '版本状态尚未核验',
+    cachedWarning: '当前结果来自缓存，不能据此证明正在运行的是最新批准版本。',
+    catalogSource: '发布目录',
+    approvedVersion: '批准版本',
+    appTag: '应用标签',
+    sourceRevision: '源码版本',
+    imageDigest: '镜像摘要',
+    opsRevision: '运维版本',
+    catalogIncomplete: '批准的发布身份信息不完整，部署前请联系运维人员。'
   },
 
   // Recharge / Subscription Page

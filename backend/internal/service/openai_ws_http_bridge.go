@@ -789,7 +789,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			bareErrorMessage = ""
 		}
 		suppressClientMessage := officialOpenAIResponses && bareErrorPending && eventType != "response.failed"
-		if eventType == "error" || eventType == "response.failed" {
+		if isOpenAIOAuthAccount(account) && (eventType == "error" || eventType == "response.failed") {
 			errMessage := extractOpenAISSEErrorMessage(upstreamMessage)
 			if errMessage == "" {
 				errMessage = "upstream error event"
@@ -854,7 +854,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 		}
 		if !clientDisconnected && !suppressClientMessage {
-			stageBeforeSemanticOutput := turn == 1 && account.Platform == PlatformOpenAI && !wroteDownstream
+			stageBeforeSemanticOutput := turn == 1 && isOpenAIOAuthAccount(account) && !wroteDownstream
 			commitStagedMessages := !stageBeforeSemanticOutput ||
 				openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
 				isOpenAIWSTerminalEvent(eventType)

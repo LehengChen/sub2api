@@ -2300,6 +2300,34 @@ func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until t
 	return nil
 }
 
+// ExtendOverloaded is the monotonic overload write used by short capacity
+// cooldowns. It cannot shorten a longer 529 overload window written concurrently.
+func (r *accountRepository) ExtendOverloaded(ctx context.Context, id int64, until time.Time) error {
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET overload_until = $1,
+			updated_at = NOW()
+		WHERE id = $2
+			AND deleted_at IS NULL
+			AND (overload_until IS NULL OR overload_until < $1)
+	`, until, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected <= 0 {
+		return nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue overload extension failed: account=%d err=%v", id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return nil
+}
+
 func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
 	result, err := r.sql.ExecContext(ctx, `
 		UPDATE accounts

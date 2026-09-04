@@ -223,6 +223,53 @@ func TestInferenceFailoverExhaustionRestoresRetryAfter(t *testing.T) {
 	require.Equal(t, "17", recorder.Header().Get("Retry-After"))
 }
 
+func TestOpenAIOAuthCapacityExhaustionReturnsSafe429(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, &service.UpstreamFailoverError{
+		StatusCode:          http.StatusBadGateway,
+		OpenAIOAuthCapacity: true,
+		ResponseHeaders:     http.Header{"Retry-After": []string{"120"}},
+		ResponseBody:        []byte(`{"error":{"type":"upstream_error","message":"Selected model is at capacity"}}`),
+	}, false)
+
+	body := strings.ToLower(recorder.Body.String())
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Equal(t, "120", recorder.Header().Get("Retry-After"))
+	require.Contains(t, body, `"type":"rate_limit_error"`)
+	require.NotContains(t, body, "upstream_error")
+	require.NotContains(t, body, "at capacity")
+	require.NotContains(t, body, "overload")
+}
+
+func TestOpenAIOAuthCapacityExhaustionAfterCommitReturnsSafeFailedEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	_, _ = recorder.WriteString(":\n\n")
+	recorder.Flush()
+
+	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, &service.UpstreamFailoverError{
+		StatusCode:          http.StatusBadGateway,
+		OpenAIOAuthCapacity: true,
+		ResponseHeaders:     http.Header{"Retry-After": []string{"120"}},
+		ResponseBody:        []byte(`{"error":{"type":"upstream_error","message":"Selected model is at capacity"}}`),
+	}, true)
+
+	body := strings.ToLower(recorder.Body.String())
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Empty(t, recorder.Result().Header.Get("Retry-After"), "committed response headers cannot be changed")
+	require.Contains(t, body, `"type":"response.failed"`)
+	require.Contains(t, body, `"code":"rate_limit_exceeded"`)
+	require.NotContains(t, body, "upstream_error")
+	require.NotContains(t, body, "at capacity")
+	require.NotContains(t, body, "overload")
+}
+
 func TestFailoverExhaustionRejectsSecretBearingRetryAfter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

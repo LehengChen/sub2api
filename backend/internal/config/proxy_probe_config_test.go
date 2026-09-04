@@ -34,7 +34,8 @@ func TestNormalizeProxyProbeURLsRejectsInvalidEntries(t *testing.T) {
 		{name: "missing parser", target: ProbeURLConfig{URL: "https://example.com"}, wantErr: "parser is required"},
 		{name: "unknown parser", target: ProbeURLConfig{URL: "https://example.com", Parser: "ip_api"}, wantErr: "unsupported parser"},
 		{name: "relative URL", target: ProbeURLConfig{URL: "/cdn-cgi/trace", Parser: "chatgpt-trace"}, wantErr: "invalid url"},
-		{name: "unsupported scheme", target: ProbeURLConfig{URL: "ftp://example.com/file", Parser: "ipify"}, wantErr: "scheme must be http or https"},
+		{name: "plaintext HTTP", target: ProbeURLConfig{URL: "http://example.com", Parser: "ipify"}, wantErr: "scheme must be https"},
+		{name: "unsupported scheme", target: ProbeURLConfig{URL: "ftp://example.com/file", Parser: "ipify"}, wantErr: "scheme must be https"},
 	}
 
 	for _, tt := range tests {

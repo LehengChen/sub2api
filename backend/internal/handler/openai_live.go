@@ -233,6 +233,8 @@ func (h *OpenAIGatewayHandler) LiveSideband(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	releaseDrainRegistration := middleware2.RegisterLongLivedConnection(c, downstream.CloseNow)
+	defer releaseDrainRegistration()
 	defer func() { _ = downstream.CloseNow() }()
 	if err := h.gatewayService.ProxyLiveSideband(c.Request.Context(), record, downstream); err != nil {
 		_ = downstream.Close(coderws.StatusInternalError, "live sideband closed")
