@@ -105,7 +105,7 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 	codexSync.Stop()
 
 	channelMonitor := ProvideChannelMonitorService(nil, nil, &SettingService{})
-	channelRunner := ProvideChannelMonitorRunner(channelMonitor, &SettingService{}, fence)
+	channelRunner := ProvideChannelMonitorRunner(channelMonitor, &SettingService{}, nil, fence)
 	require.False(t, channelRunner.started, "standby started channel monitor runner")
 	channelRunner.Stop()
 
