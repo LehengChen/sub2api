@@ -130,8 +130,8 @@ func TestOpenAIOAuthCapacityShedEventRecognizesOnlyKnownSignals(t *testing.T) {
 	nonCapacity := []byte(`{"type":"response.failed","error":{"type":"invalid_request_error","message":"The service rejected this invalid request."}}`)
 	require.False(t, isOpenAIOAuthCapacityShedEvent(oauth, nonCapacity, ""))
 	require.False(t, isOpenAIOAuthCapacityShedEvent(oauth, nil, "Our servers are currently overloaded for maintenance. Please try again later."))
-	require.False(t, isOpenAITransientProcessingError(http.StatusBadRequest, openAIUpstreamOverloadMessage, nil),
-		"the production phrase must stay out of the cross-platform transient classifier")
+	require.True(t, isOpenAITransientProcessingError(http.StatusBadRequest, openAIUpstreamOverloadMessage, nil),
+		"v0.2.0 recognizes the phrase generically; account-scoped handling above must remain OAuth-only")
 }
 
 func TestSanitizeOpenAIOAuthCapacityEventRemovesKnownSignalShapes(t *testing.T) {

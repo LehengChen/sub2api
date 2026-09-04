@@ -1177,6 +1177,20 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	return !openAIStreamEventIsPreamble(eventType)
 }
 
+// Protocol output tracks whether an upstream frame must be preserved for the
+// historical EOF/missing-terminal path. It deliberately differs from the
+// payload-aware progress and semantic classifiers below.
+func openAIStreamDataStartsProtocolOutput(data, eventType string) bool {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "" {
+		return false
+	}
+	if strings.TrimSpace(eventType) == "response.failed" {
+		return false
+	}
+	return !openAIStreamEventIsPreamble(eventType)
+}
+
 func openAIStreamItemHasVisibleOutput(item gjson.Result) bool {
 	if item.Get("arguments").String() != "" || item.Get("input").String() != "" || item.Get("result").String() != "" {
 		return true
@@ -1310,10 +1324,9 @@ func openAIStreamDataStartsSemanticOutput(payload []byte, eventType string) bool
 	}
 	switch eventType {
 	case "keepalive", "response.created", "response.in_progress", "response.queued", "response.metadata",
+		"response.output_item.added", "response.content_part.added", "response.reasoning_summary_part.added",
 		"response.failed", "error":
 		return false
-	case "response.output_item.added", "response.content_part.added", "response.reasoning_summary_part.added":
-		return openAIStreamAddedEventStartsClientOutput(payload, eventType)
 	}
 	if strings.HasSuffix(eventType, ".delta") {
 		return openAIStreamJSONValueHasContent(gjson.GetBytes(payload, "delta"))
@@ -1328,7 +1341,7 @@ func (s *openAIStreamOutputState) observe(payload []byte, eventType string) (boo
 	if s == nil {
 		return false, false
 	}
-	protocolStarted := openAIStreamDataStartsClientOutput(string(payload), eventType)
+	protocolStarted := openAIStreamDataStartsProtocolOutput(string(payload), eventType)
 	semanticStarted := openAIStreamDataStartsSemanticOutput(payload, eventType)
 	resolvedEventType := strings.TrimSpace(eventType)
 	if resolvedEventType == "" && gjson.ValidBytes(payload) {
@@ -1556,7 +1569,8 @@ func logOpenAIOAuthCapacityDecision(
 		logMessage = "openai.responses.oauth_capacity_postwrite_rewrite"
 	}
 	capacityMatch := "message"
-	if isOpenAIUpstreamCapacityShedEvent(payload) {
+	switch openAIStreamFailedEventErrorCode(payload) {
+	case "server_is_overloaded", "slow_down":
 		capacityMatch = "code"
 	}
 	logger.FromContext(ctx).With(
@@ -2111,7 +2125,7 @@ func (s *OpenAIGatewayService) nonStreamingTerminalFailureFailover(
 	message string,
 	canonicalModel ...string,
 ) *UpstreamFailoverError {
-	if account == nil {
+	if account == nil || !isOpenAIOAuthAccount(account) {
 		return nil
 	}
 	if isOpenAIOAuthCapacityShedEvent(account, payload, message) {
@@ -2134,9 +2148,18 @@ func (s *OpenAIGatewayService) nonStreamingTerminalFailureFailover(
 	if IsResponseCommitted(c) {
 		return nil
 	}
-	shouldFailover := openAIStreamFailedEventShouldFailover(payload, message)
+	shouldFailover := false
 	if terminalType == "error" {
 		shouldFailover = openAIStreamErrorEventShouldFailover(payload, message)
+	} else {
+		// Keep response.failed conservative in the non-streaming extension:
+		// unlike the streaming path, unknown failed payloads must not acquire a
+		// new failover behavior merely because the request used stream=false.
+		if openAIStreamFailureStatus(payload, message) != http.StatusTooManyRequests &&
+			!isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
+			return nil
+		}
+		shouldFailover = openAIStreamFailedEventShouldFailover(payload, message)
 	}
 	if !shouldFailover {
 		return nil
@@ -2358,7 +2381,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
-			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
+			suppressCurrentEvent = codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed"
 		}
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
@@ -2368,7 +2391,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			trimmedData := strings.TrimSpace(data)
-			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			rawEventType := strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			observer.ObserveOpenAI(dataBytes, rawEventType)
 			if needModelReplace && strings.Contains(data, mappedModel) {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
@@ -2399,17 +2422,18 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					line = "data: " + string(restoredData)
 				}
 			}
-			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
-			if (eventType == "error" || eventType == "response.failed") &&
+			eventType := strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
+			capacityEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			if (capacityEventType == "error" || capacityEventType == "response.failed") &&
 				isOpenAIOAuthCapacityShedEvent(account, dataBytes, extractOpenAISSEErrorMessage(dataBytes)) {
 				clientOutputWritten := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, eventType, true, upstreamRequestID, clientOutputWritten, outputState)
+				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, capacityEventType, true, upstreamRequestID, clientOutputWritten, outputState)
 				markCapacityAccount()
 				if !outputState.semanticOutputStarted {
 					return resultWithUsage(),
 						s.newOpenAIOAuthCapacityFailoverError(c, account, true, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
 				}
-				if sanitizedData, sanitized := sanitizeOpenAIOAuthCapacityEventForClient(account, dataBytes, eventType); sanitized {
+				if sanitizedData, sanitized := sanitizeOpenAIOAuthCapacityEventForClient(account, dataBytes, capacityEventType); sanitized {
 					dataBytes = sanitizedData
 					trimmedData = strings.TrimSpace(string(sanitizedData))
 					line = "data: " + string(sanitizedData)
@@ -2559,7 +2583,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if semanticOutputGuard {
 				lineStartsClientOutput = forceFlushFailedEvent || startsSemanticOutput
 			}
-			if firstTokenMs == nil && openAIStreamDataStartsTTFT(trimmedData, eventType, forceFlushFailedEvent, ttftMode) {
+			startsTTFTOutput := openAIStreamDataStartsTTFT(trimmedData, eventType, forceFlushFailedEvent, ttftMode)
+			if semanticOutputGuard && ttftMode == OpenAITTFTModeSemantic {
+				startsTTFTOutput = forceFlushFailedEvent || startsSemanticOutput
+			}
+			if firstTokenMs == nil && startsTTFTOutput {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 			}

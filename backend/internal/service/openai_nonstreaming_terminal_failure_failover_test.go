@@ -36,11 +36,8 @@ func newNonStreamingFailoverAccount() *Account {
 	return &Account{
 		ID:       1,
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeAPIKey,
-		Name:     "pool-account",
-		Credentials: map[string]any{
-			"pool_mode": true,
-		},
+		Type:     AccountTypeOAuth,
+		Name:     "oauth-account",
 	}
 }
 
@@ -77,32 +74,28 @@ func TestNonStreamingSSEToJSON_CapacityFailedEventFailsOver(t *testing.T) {
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
-	// 容量降载是请求级信号，先在同账号有界重试——与流式路径同一套策略。
-	require.True(t, failoverErr.RetryableOnSameAccount)
-	require.Contains(t, string(failoverErr.ResponseBody), "Selected model is at capacity")
+	require.True(t, failoverErr.OpenAIOAuthCapacity)
+	require.False(t, failoverErr.RetryableOnSameAccount)
 	// 换号的前提：一个字节都没写出去。
 	require.False(t, c.Writer.Written())
 	require.Empty(t, rec.Body.String())
 }
 
-// 行为翻转点：未被分类为不可重试的泛化 response.failed，此前回 502，现在换号。
-// 与流式路径对齐的结果，显式钉住以免被当成回归。
-func TestNonStreamingSSEToJSON_UnclassifiedFailedEventFailsOver(t *testing.T) {
+// 未知 response.failed 不足以证明换号有意义，继续走协议错误路径。
+func TestNonStreamingSSEToJSON_UnclassifiedFailedEventStaysProtocolError(t *testing.T) {
 	c, rec := newNonStreamingFailoverContext(t)
 	svc := newNonStreamingFailoverService()
 	payload := []byte(`{"type":"response.failed","error":{"message":"upstream rejected request"}}`)
 	body := sseTerminalBody("response.failed", string(payload))
 
-	// 前提：流式分类器对同一帧的裁决就是「换号」。翻转不是新政策，是补齐。
-	require.True(t, openAIStreamFailedEventShouldFailover(payload, "upstream rejected request"))
-
 	result, err := svc.handleSSEToJSON(newNonStreamingSSEResponse(), c, newNonStreamingFailoverAccount(), body, "model", "model")
 
 	require.Nil(t, result)
 	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr)
-	require.False(t, c.Writer.Written())
-	require.Empty(t, rec.Body.String())
+	require.Error(t, err)
+	require.False(t, errors.As(err, &failoverErr))
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Body.String(), "upstream rejected request")
 }
 
 // 「response.failed 必须回写协议错误」这一契约没有丢：明确不可重试的错误仍写 502。
@@ -197,13 +190,15 @@ func TestNonStreamingPassthroughSSEToJSON_CapacityFailedEventFailsOver(t *testin
 	require.Nil(t, result)
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
-	require.Contains(t, string(failoverErr.ResponseBody), "Selected model is at capacity")
+	require.True(t, failoverErr.OpenAIOAuthCapacity)
+	require.False(t, failoverErr.RetryableOnSameAccount)
 	require.False(t, c.Writer.Written())
 	require.Empty(t, rec.Body.String())
 }
 
-// 不变式：非流式的裁决必须与流式分类器逐项一致。任何一边以后改了判定，这条会红。
-func TestNonStreamingSSEToJSON_MatchesStreamingClassifierVerdict(t *testing.T) {
+// 非流式扩展只接受 OAuth capacity 或明确的 429/瞬时分类，不能继承流式
+// response.failed 对未知错误的宽松默认值。
+func TestNonStreamingSSEToJSON_RequiresPositiveScopedClassifier(t *testing.T) {
 	payloads := []string{
 		`{"type":"response.failed","error":{"message":"Selected model is at capacity. Please try a different model.","type":"invalid_request_error"}}`,
 		`{"type":"response.failed","error":{"message":"upstream rejected request"}}`,
@@ -215,16 +210,20 @@ func TestNonStreamingSSEToJSON_MatchesStreamingClassifierVerdict(t *testing.T) {
 	for _, data := range payloads {
 		t.Run(data[:min(len(data), 60)], func(t *testing.T) {
 			payload := []byte(data)
-			want := openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
+			message := extractOpenAISSEErrorMessage(payload)
+			account := newNonStreamingFailoverAccount()
+			want := isOpenAIOAuthCapacityShedEvent(account, payload, message) ||
+				openAIStreamFailureStatus(payload, message) == http.StatusTooManyRequests ||
+				isOpenAITransientProcessingError(http.StatusBadRequest, message, payload)
 
 			c, _ := newNonStreamingFailoverContext(t)
 			svc := newNonStreamingFailoverService()
 			_, err := svc.handleSSEToJSON(newNonStreamingSSEResponse(), c,
-				newNonStreamingFailoverAccount(), sseTerminalBody("response.failed", data), "model", "model")
+				account, sseTerminalBody("response.failed", data), "model", "model")
 
 			var failoverErr *UpstreamFailoverError
 			require.Equal(t, want, errors.As(err, &failoverErr),
-				"非流式裁决与流式分类器不一致：%s", data)
+				"非流式裁决必须要求明确的 OAuth/瞬时证据：%s", data)
 		})
 	}
 }

@@ -505,13 +505,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
-			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
+			suppressCurrentEvent = codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed"
 			currentSSEEventType = eventType
 		}
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
-			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			eventType := strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
+			capacityEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			observer.ObserveOpenAI(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
@@ -528,16 +529,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
 			}
-			if (eventType == "error" || eventType == "response.failed") &&
+			if (capacityEventType == "error" || capacityEventType == "response.failed") &&
 				isOpenAIOAuthCapacityShedEvent(account, dataBytes, extractOpenAISSEErrorMessage(dataBytes)) {
 				clientOutputWritten := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, eventType, false, upstreamRequestID, clientOutputWritten, outputState)
+				logOpenAIOAuthCapacityDecision(ctx, account, dataBytes, capacityEventType, false, upstreamRequestID, clientOutputWritten, outputState)
 				markCapacityAccount()
 				if !outputState.semanticOutputStarted {
 					streamEarlyErr = s.newOpenAIOAuthCapacityFailoverError(c, account, false, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
 					return
 				}
-				if sanitizedData, sanitized := sanitizeOpenAIOAuthCapacityEventForClient(account, dataBytes, eventType); sanitized {
+				if sanitizedData, sanitized := sanitizeOpenAIOAuthCapacityEventForClient(account, dataBytes, capacityEventType); sanitized {
 					dataBytes = sanitizedData
 					data = string(sanitizedData)
 					line = "data: " + data
@@ -719,12 +720,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if outputEventType == "" {
 				outputEventType = currentSSEEventType
 			}
-			_, startsSemanticOutput := outputState.observe(dataBytes, outputEventType)
+			startsProtocolOutput, startsSemanticOutput := outputState.observe(dataBytes, outputEventType)
 			startsProgressOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
 			startsCommitOutput := startsProgressOutput
 			startsTTFTOutput := openAIStreamDataStartsTTFT(data, eventType, forceFlushFailedEvent, ttftMode)
 			if isOpenAIOAuthAccount(account) {
+				startsProgressOutput = forceFlushFailedEvent || startsProtocolOutput
 				startsCommitOutput = forceFlushFailedEvent || startsSemanticOutput
+				if ttftMode == OpenAITTFTModeSemantic {
+					startsTTFTOutput = forceFlushFailedEvent || startsSemanticOutput
+				}
 			}
 			eventStartsProgressOutput = eventStartsProgressOutput || startsProgressOutput
 			if stageBeforeSemanticOutput {
@@ -760,7 +765,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				if firstOutputStage != nil && !firstOutputCommitted && startsCommitOutput {
 					shouldFlush = true
 				}
-				if firstTokenMs == nil && startsTTFTOutput {
+				// A semantic TTFT event may still be a structural frame held in the
+				// first-output stage. Record its timestamp, but do not commit the
+				// staged response until the event itself is replay-safe.
+				if firstTokenMs == nil && startsTTFTOutput && (!stageBeforeSemanticOutput || startsCommitOutput) {
 					// 保证首个 token 事件尽快出站，避免影响 TTFT。
 					shouldFlush = true
 				}
