@@ -4,21 +4,21 @@ This file records runtime differences carried by the Frenzy candidate relative
 to the upstream release. Upstreamed fixes are recorded so they are not replayed
 as local patches during the next sync.
 
-## v0.2.0 baseline
+## v0.2.1 baseline
 
-- Upstream tag: `v0.2.0`
-- Upstream peeled commit: `aa236488351eb71e120fc2b6fb32e36b0374c918`
-- Baseline status: v0.2.0 is merged with the reviewed Frenzy patch line in the
+- Upstream tag: `v0.2.1`
+- Upstream peeled commit: `578785ee7fb35030b094b69624efe25670a36f5f`
+- Baseline status: v0.2.1 is merged with the reviewed Frenzy patch line in the
   isolated upgrade tree. No AWS, production, or traffic action is implied by
   this source merge; build, image, migration, and standby gates remain separate.
-- The upstream tag still declares `0.1.185` in `backend/cmd/server/VERSION`;
-  this candidate normalizes it to `0.2.0` so the binary, UI, and release
+- The upstream tag still declares `0.2.0` in `backend/cmd/server/VERSION`;
+  this candidate normalizes it to `0.2.1` so the binary, UI, and release
   evidence use one version identity.
-- v0.2.0 upstream adds OpenAI Fast group policy, model-scoped reasoning effort,
-  native Kimi Responses forwarding, Claude Fable 5.1, call-ID-less scheduled
-  automation, and WebSocket/model-fallback fixes. None of those changes proves
-  the OAuth/account-scoped capacity contract below, so FZ-010/011/013 remain
-  explicit local patches.
+- v0.2.1 upstream adds the GPT-6 Astra model manifest updates, per-group Codex
+  model manifests, upstream request IDs in usage logs, and migrations 232-234.
+  None of those changes classifies OAuth `invalid_prompt` as request-scoped or
+  proves the OAuth/account-scoped capacity contract below, so FZ-010/011/013
+  and FZ-015 remain explicit local patches.
 
 ### Prior v0.1.177 baseline (historical)
 
@@ -26,7 +26,7 @@ as local patches during the next sync.
 - Upstream peeled commit: `073e92d17178a1ccdb0a27017f572f10c9c7ab62`
 - Upstream capacity recovery: `8f7b0a314de816daabb5b761db3025cb10c3eca9` (PR #5398)
 - This section records the previous synchronization point only. Do not use its
-  production-status sentence as the status of the v0.2.0 candidate.
+  production-status sentence as the status of the v0.2.1 candidate.
 - `backend/cmd/server/VERSION` is normalized from the tag's stale `0.1.176` to
   `0.1.177`; release builds should still inject the immutable candidate version.
 - FZ-010 was carried as a local reimplementation because the upstream capacity
@@ -58,10 +58,10 @@ applied_commits:
   - 0b5f9e16cf4617442e0f0543598ecaec4c8a20f4
 stable_patch_ids:
   - b676c2495ff399d2ae5b1fe2b4fdf0fa01a61204
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
-- Exit and quality probes remain HTTPS-only. Upstream v0.2.0 still uses the
+- Exit and quality probes remain HTTPS-only. Upstream v0.2.1 still uses the
   HTTP targets without this patch; the code and focused tests applied cleanly.
 
 ## FZ-002: isolated offline pricing
@@ -75,7 +75,7 @@ applied_commits:
   - bbbf371d856038ace4d1651f87d141c8df557406
 stable_patch_ids:
   - c28d9bb835a86e352b1d04277ec7a0dc925fe2a0
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - `pricing.remote_updates_enabled=false` uses packaged/fallback pricing and
@@ -102,15 +102,15 @@ stable_patch_ids:
   - eb5f06a591046d521553b6015d1cc90caa1900e0
   - ff5201438b2be96eb4eb4e7d04c8fb61c386c0d6
   - 0594c168fb5533516922aaff800f318cc64d0fef
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
-- Recalculated on the v0.2.0 module graph: `golang.org/x/image` is 0.45.0,
+- Recalculated on the v0.2.1 module graph: `golang.org/x/image` is 0.45.0,
   OpenTelemetry core/metric/sdk/trace are 1.44.0, and the frontend uses
   `@e965/xlsx` 0.20.3 instead of `xlsx` 0.18.5. The obsolete explicit Wire
   tool requirement is dropped; upstream's readonly generator checksums remain.
 - Non-transactional migrations 175a and 190 drop an invalid concurrent index
-  before retrying, while the v0.2.0 migrations 222/223 remain preserved.
+  before retrying, while the v0.2.1 migrations 232-234 remain preserved.
 - Dependency audit, unit tests, and image scanning must be rerun for the final
   candidate; old v0.1.172 scan results are not evidence for this release.
 
@@ -126,11 +126,11 @@ applied_commits:
 stable_patch_ids:
   - cea97db42140175ed659393db8b4c5b2f2d45dd9
   - 01a55392cd874a4e6f1a4688430ace1bd434ddbc
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - Externally managed deployments expose read-only version health but disable
-  in-application update, rollback, and restart controls. The v0.2.0 Wire
+  in-application update, rollback, and restart controls. The v0.2.1 Wire
   graph was regenerated rather than copying the old generated file.
 
 ## FZ-005: readiness and bounded drain
@@ -149,7 +149,7 @@ stable_patch_ids:
   - 90941563989f468d721fd5d4783058bcf205ab6c
   - ca3f91b3856874b2b896d669ed4fcc1f52c1162a
   - c3ee1aaa8a08bb0f58d591189974beef122efee0
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - `/livez` and dependency-backed `/readyz`, migration readiness, request and
@@ -167,11 +167,11 @@ applied_commits:
   - 61fb096564ec55a82d582e8920f9eb927e8a5506
 stable_patch_ids:
   - a0bedb66b091548f3d24a1573e0aff53997c2e1e
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - Claude, OpenAI, Grok, Gemini, and Antigravity OAuth state is injected through
-  the fail-closed Redis session store. The v0.2.0 Grok password/SSO and token
+  the fail-closed Redis session store. The v0.2.1 Grok password/SSO and token
   validation behavior is retained while its session lifecycle uses the shared
   store; memory stores remain limited to direct/test constructors.
 
@@ -189,12 +189,12 @@ stable_patch_ids:
   - d029b0965dce360745b8a0b3f31fa495b654daf7
   - 77c6a2470cc7f1c4e56e3ccb581f8189dae7ff0b
   - 409888b8a2f81ad5406d6d9e468dd5b52a3d1f45
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - Explicit active/api/worker/standby/migrator roles, Redis worker lease and
   readiness fencing, migration-only startup, and inert standby providers are
-  carried. The v0.2.0 Channel Monitor runner and V2 aggregator are also
+  carried. The v0.2.1 Channel Monitor runner and V2 aggregator are also
   fenced, and shutdown cleans workers before releasing the runtime lease.
 - This preserves manual cold standby. It does not approve active-active or
   automatic failover; critical write fencing still requires separate proof.
@@ -210,11 +210,11 @@ applied_commits:
   - 453deff3a63d666863aa31d72972d3632ef94cee
 stable_patch_ids:
   - 14c320693cd8eedd3267f3eca38731567e1b1eac
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - Every redirect hop revalidates scheme, host allowlist, userinfo, port, and
-  private DNS resolution. v0.2.0 transport behavior is preserved.
+  private DNS resolution. v0.2.1 transport behavior is preserved.
 
 ## FZ-009: pinned container build inputs
 
@@ -226,7 +226,7 @@ applied_commits:
   - 700ab158229365e512849c1772f2cda7b1a2cbbd
 stable_patch_ids:
   - 36a5dc267f33b12d6a25afb216313515a0e4f998
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - Dockerfile frontend, Node 24, Go 1.27.0, Alpine 3.21, PostgreSQL 18, and
@@ -248,7 +248,7 @@ applied_commits:
   - dfa39ebc341209e0a49e0a83717a71e0ea534a24
 upstream_commit_reviewed: c33c3208e307c53c82daebc0ba303c3f09b51308
 upstream_test_calibration_reviewed: 14a27f196
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/pull/5398
 ```
 
@@ -285,7 +285,7 @@ applied_commits:
   - 7c9e545e9e62e5490228226cf933efe811c9209c
 upstream_stable_patch_id: 382e95eb4d1abefe9a23814df687523a4e568c3f
 scope_fix_stable_patch_id: 00b4dc259198fa7aedeacfc5c91b2a5e5627541a
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/pull/5326
 ```
 
@@ -311,10 +311,10 @@ upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/pull/5326
 id: FZ-012
 order: 115
 status: reimplement
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
-- The v0.2.0 tree carries the FZ-005 lifecycle handlers, but its embedded
+- The v0.2.1 tree carries the FZ-005 lifecycle handlers, but its embedded
   frontend middleware does not bypass `/livez` or `/readyz`; those paths then
   receive the SPA document instead of the JSON health routes.
 - This two-line compatibility fix is required for the existing readiness and
@@ -326,7 +326,7 @@ last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 id: FZ-013
 order: 120
 status: reimplement
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/5281
 ```
 
@@ -351,7 +351,7 @@ id: FZ-014
 order: 130
 status: reimplement
 original_commit: 6fbd4b4a85adf1e7df830a43f0417c3c25c082c7
-last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
 ```
 
 - Intent: keep the admin account-usage page responsive when many OpenAI OAuth
@@ -363,3 +363,32 @@ last_reviewed_against: aa236488351eb71e120fc2b6fb32e36b0374c918
 - Failure policy: quota snapshots are returned when local statistics time out
   or fail, with structured slow/error logs for diagnosis. This patch does not
   change gateway scheduling or account capacity behavior.
+
+## FZ-015: OpenAI OAuth `invalid_prompt` is not an account failure
+
+```yaml
+id: FZ-015
+order: 140
+status: reimplement
+applied_commits:
+  - e13b393cce54994e5d1a7e9769ee32a1ad6ddabe
+stable_patch_ids:
+  - 5956afdd2d63f23c21587f70b187fbe83febfba5
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
+upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/6712
+```
+
+- Intent: treat an OpenAI OAuth `invalid_prompt` response as a request-scoped
+  client error, return it to the caller, and never use it to switch accounts.
+  This prevents one rejected prompt from being replayed across the account pool.
+- Detection is deliberately narrow: exact structured error type/code
+  `invalid_prompt`, plus the exact observed usage-policy sentence prefix from
+  Issue #6712. Generic text containing `invalid prompt` does not match.
+- Scope: native and passthrough Responses streams, `stream=false` SSE-to-JSON,
+  and the WebSocket-to-HTTP bridge. Existing direct HTTP 400 behavior remains
+  unchanged. API-key, Grok, capacity, and ordinary transient handling retain
+  their prior behavior.
+- Diagnostics record account ID, path, event type, match source, upstream
+  request ID, and `decision=return_client_error`; prompt and response bodies are
+  not logged. No account cooldown, scheduler, schema, admin setting, migration,
+  or infrastructure change is introduced by FZ-015.
