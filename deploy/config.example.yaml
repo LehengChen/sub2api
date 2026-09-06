@@ -45,6 +45,14 @@ server:
   trusted_proxies:
     - 127.0.0.1/32
     - ::1/128
+  # Total timeout for PostgreSQL, Redis, and migration readiness checks (seconds)
+  # PostgreSQL、Redis 与迁移就绪检查共用的总超时（秒）
+  readiness_timeout_seconds: 2
+  # Maximum time to drain active HTTP/SSE/WebSocket requests after SIGTERM (seconds)
+  # SIGTERM 后等待现有 HTTP/SSE/WebSocket 请求排空的最大时间（秒）
+  # Keep this aligned with the load balancer, container, and service-manager timeouts.
+  # 应与负载均衡器、容器和服务管理器的超时保持一致。
+  shutdown_timeout_seconds: 30
   # Global max request body size in bytes (default: 256MB)
   # 全局最大请求体大小（字节，默认 256MB）
   # Applies to all requests, especially important for h2c first request memory protection
@@ -1054,6 +1062,11 @@ plugins:
 # 定价数据源（可选）
 # =============================================================================
 pricing:
+  # Allow background downloads from the remote pricing source (default: true)
+  # 是否允许后台从远程价格源下载更新（默认：true）
+  # Set to false for isolated/offline deployments; the local cache or fallback file is used.
+  # 隔离或离线部署可设为 false，此时仅使用本地缓存或备用文件。
+  remote_updates_enabled: true
   # URL to fetch model pricing data (default: model-price-repo main branch)
   # 获取模型定价数据的 URL（默认：model-price-repo main 分支）
   remote_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/refs/heads/main//model_prices_and_context_window.json"

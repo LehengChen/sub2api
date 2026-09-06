@@ -709,8 +709,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			return nil
 		}
 		clientMessage := buildOpenAIWSHTTPBridgeFailedEvent(responseID, originalModel, bareErrorPayload, bareErrorMessage)
-		if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
-			clientMessage = rewritten
+		if isOpenAIOAuthAccount(account) {
+			if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
+				clientMessage = rewritten
+			}
 		}
 		messages := append(pendingClientMessages, clientMessage)
 		pendingClientMessages = nil
@@ -866,13 +868,17 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		// 重试。账号状态与终止事件判定（下方 handleOpenAIWSTerminalTransientFailure）
 		// 仍使用未改写的 upstreamMessage。
 		clientMessage := upstreamMessage
-		if eventType == "error" || eventType == "response.failed" {
+		if isOpenAIOAuthAccount(account) && (eventType == "error" || eventType == "response.failed") {
 			if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
 				clientMessage = rewritten
 			}
 		}
 		if !clientDisconnected && !suppressClientMessage {
-			stageBeforeSemanticOutput := turn == 1 && account.Platform == PlatformOpenAI && !wroteDownstream
+			// The v0.2 WS bridge stages the first OpenAI Responses frames for
+			// every OpenAI account. This preserves the pre-output terminal check
+			// for API-key accounts as well; capacity sanitization remains
+			// OAuth-only above.
+			stageBeforeSemanticOutput := turn == 1 && account != nil && account.Platform == PlatformOpenAI && !wroteDownstream
 			commitStagedMessages := !stageBeforeSemanticOutput ||
 				openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
 				isOpenAIWSTerminalEvent(eventType)

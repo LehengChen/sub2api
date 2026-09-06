@@ -55,22 +55,32 @@ type SubscriptionService struct {
 	subCacheTTL    time.Duration
 	subCacheJitter int // 抖动百分比
 
-	maintenanceQueue *SubscriptionMaintenanceQueue
-	now              func() time.Time
+	maintenanceQueue    *SubscriptionMaintenanceQueue
+	maintenanceDisabled bool
+	now                 func() time.Time
 }
 
 // NewSubscriptionService 创建订阅服务
 func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscriptionRepository, billingCacheService *BillingCacheService, entClient *dbent.Client, cfg *config.Config) *SubscriptionService {
+	return newSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg, true, true)
+}
+
+func newSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscriptionRepository, billingCacheService *BillingCacheService, entClient *dbent.Client, cfg *config.Config, startWorkers bool, initializeCache bool) *SubscriptionService {
 	svc := &SubscriptionService{
 		groupRepo:           groupRepo,
 		userSubRepo:         userSubRepo,
 		billingCacheService: billingCacheService,
 		entClient:           entClient,
+		maintenanceDisabled: !startWorkers,
 		now:                 time.Now,
 	}
-	svc.initSubCache(cfg)
-	svc.initMaintenanceQueue(cfg)
-	svc.StartSubCacheInvalidationSubscriber(context.Background())
+	if initializeCache {
+		svc.initSubCache(cfg)
+	}
+	if startWorkers {
+		svc.initMaintenanceQueue(cfg)
+		svc.StartSubCacheInvalidationSubscriber(context.Background())
+	}
 	return svc
 }
 
@@ -1036,7 +1046,7 @@ func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, grou
 // 而 IsExpired()=true 的订阅在 ValidateAndCheckLimits 中已被拦截返回错误，
 // 因此进入此方法的订阅一定未过期，无需处理过期状态同步。
 func (s *SubscriptionService) DoWindowMaintenance(sub *UserSubscription) {
-	if s == nil {
+	if s == nil || s.maintenanceDisabled {
 		return
 	}
 	if s.maintenanceQueue != nil {

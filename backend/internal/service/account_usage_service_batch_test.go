@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,36 @@ func (r *usageBatchLogRepoStub) GetDailyStatsAggregated(context.Context, int64, 
 	return nil, nil
 }
 
+type usageBatchWindowStatsRepoStub struct {
+	usageBatchLogRepoStub
+
+	mu             sync.Mutex
+	startTimeCalls []map[int64]time.Time
+	batchErr       error
+}
+
+func (r *usageBatchWindowStatsRepoStub) GetAccountWindowStatsBatchByStartTimes(_ context.Context, starts map[int64]time.Time) (map[int64]*usagestats.AccountStats, error) {
+	r.mu.Lock()
+	call := make(map[int64]time.Time, len(starts))
+	for accountID, start := range starts {
+		call[accountID] = start
+	}
+	r.startTimeCalls = append(r.startTimeCalls, call)
+	r.mu.Unlock()
+	if r.batchErr != nil {
+		return nil, r.batchErr
+	}
+
+	result := make(map[int64]*usagestats.AccountStats, len(starts))
+	for accountID := range starts {
+		result[accountID] = &usagestats.AccountStats{
+			Requests: accountID,
+			Tokens:   accountID * 10,
+		}
+	}
+	return result, nil
+}
+
 func TestAccountUsageService_GetUsageBatch_BestEffortByAccount(t *testing.T) {
 	t.Parallel()
 
@@ -187,5 +218,118 @@ func TestAccountUsageService_GetUsageBatch_BestEffortByAccount(t *testing.T) {
 
 	if !strings.Contains(strings.ToLower(errorsByAccount[7003]), "does not support usage query") {
 		t.Fatalf("expected API key account error to be preserved, got %q", errorsByAccount[7003])
+	}
+}
+
+func TestAccountUsageService_GetUsageBatch_BatchesOpenAIWindowStats(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	firstReset := now.Add(2 * time.Hour).Truncate(time.Second)
+	secondReset := now.Add(3 * time.Hour).Truncate(time.Second)
+	accounts := []Account{
+		{
+			ID:       8001,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeOAuth,
+			Extra: map[string]any{
+				"codex_usage_updated_at": time.Now().UTC().Format(time.RFC3339),
+				"codex_5h_used_percent":  10.0,
+				"codex_5h_reset_at":      firstReset.Format(time.RFC3339),
+				"codex_7d_used_percent":  20.0,
+				"codex_7d_reset_at":      firstReset.Add(24 * time.Hour).Format(time.RFC3339),
+			},
+		},
+		{
+			ID:       8002,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeOAuth,
+			Extra: map[string]any{
+				"codex_usage_updated_at": time.Now().UTC().Format(time.RFC3339),
+				"codex_5h_used_percent":  30.0,
+				"codex_5h_reset_at":      secondReset.Format(time.RFC3339),
+				"codex_7d_used_percent":  40.0,
+				"codex_7d_reset_at":      secondReset.Add(24 * time.Hour).Format(time.RFC3339),
+			},
+		},
+	}
+	repo := &usageBatchWindowStatsRepoStub{}
+	accountRepo := &stubOpenAIAccountRepo{accounts: accounts}
+	svc := &AccountUsageService{
+		accountRepo:  accountRepo,
+		usageLogRepo: repo,
+		cache:        NewUsageCache(),
+	}
+
+	usageByAccount, errorsByAccount, err := svc.GetUsageBatch(context.Background(), []int64{8001, 8002}, false)
+	if err != nil {
+		t.Fatalf("GetUsageBatch() error = %v", err)
+	}
+	if len(errorsByAccount) != 0 {
+		t.Fatalf("unexpected per-account errors: %#v", errorsByAccount)
+	}
+	for _, accountID := range []int64{8001, 8002} {
+		usage := usageByAccount[accountID]
+		if usage == nil || usage.FiveHour == nil || usage.SevenDay == nil {
+			t.Fatalf("expected both OpenAI windows for account %d, got %#v", accountID, usage)
+		}
+		if usage.FiveHour.WindowStats == nil || usage.FiveHour.WindowStats.Requests != accountID {
+			t.Fatalf("expected batched 5h stats for account %d, got %#v", accountID, usage.FiveHour.WindowStats)
+		}
+		if usage.SevenDay.WindowStats == nil || usage.SevenDay.WindowStats.Requests != accountID {
+			t.Fatalf("expected batched 7d stats for account %d, got %#v", accountID, usage.SevenDay.WindowStats)
+		}
+	}
+
+	repo.mu.Lock()
+	calls := append([]map[int64]time.Time(nil), repo.startTimeCalls...)
+	repo.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected one batch query per window, got %d", len(calls))
+	}
+	if len(calls[0]) != 2 || len(calls[1]) != 2 {
+		t.Fatalf("expected both accounts in each batch query, got %#v", calls)
+	}
+	if got := calls[0][8001]; got.Sub(firstReset.Add(-5*time.Hour)) > time.Second || got.Sub(firstReset.Add(-5*time.Hour)) < -time.Second {
+		t.Fatalf("5h start for account 8001 = %v, want near %v", got, firstReset.Add(-5*time.Hour))
+	}
+	if got := calls[0][8002]; got.Sub(secondReset.Add(-5*time.Hour)) > time.Second || got.Sub(secondReset.Add(-5*time.Hour)) < -time.Second {
+		t.Fatalf("5h start for account 8002 = %v, want near %v", got, secondReset.Add(-5*time.Hour))
+	}
+}
+
+func TestAccountUsageService_GetUsageBatch_WindowStatsFailureKeepsQuotaSnapshot(t *testing.T) {
+	t.Parallel()
+
+	resetAt := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	account := Account{
+		ID:       8003,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra: map[string]any{
+			"codex_usage_updated_at": time.Now().UTC().Format(time.RFC3339),
+			"codex_5h_used_percent":  55.0,
+			"codex_5h_reset_at":      resetAt.Format(time.RFC3339),
+			"codex_7d_used_percent":  65.0,
+			"codex_7d_reset_at":      resetAt.Add(24 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	repo := &usageBatchWindowStatsRepoStub{batchErr: context.Canceled}
+	svc := &AccountUsageService{
+		accountRepo:  &stubOpenAIAccountRepo{accounts: []Account{account}},
+		usageLogRepo: repo,
+		cache:        NewUsageCache(),
+	}
+
+	usageByAccount, errorsByAccount, err := svc.GetUsageBatch(context.Background(), []int64{account.ID}, false)
+	if err != nil {
+		t.Fatalf("GetUsageBatch() error = %v", err)
+	}
+	if len(errorsByAccount) != 0 {
+		t.Fatalf("window stats failure should not become an account error: %#v", errorsByAccount)
+	}
+	usage := usageByAccount[account.ID]
+	if usage == nil || usage.FiveHour == nil || usage.FiveHour.Utilization != 55.0 {
+		t.Fatalf("expected quota snapshot despite stats failure, got %#v", usage)
 	}
 }
