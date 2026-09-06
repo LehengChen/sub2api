@@ -633,6 +633,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	pendingClientMessages := make([][]byte, 0, 4)
 	pendingClientMessageBytes := int64(0)
 	capacityFailoverSuppressedLogged := false
+	invalidPromptNoFailoverLogged := false
 	clientDisconnected := false
 	officialOpenAIResponses := account != nil && account.Platform == PlatformOpenAI
 	bareErrorPending := false
@@ -821,6 +822,13 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 					s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(
 						c, body, "ingress_ws_http_bridge_invalid_encrypted_lineage_mark", account.ID, turn,
 					)
+				}
+			}
+			if isOpenAIOAuthInvalidPromptEvent(account, upstreamMessage, errMessage) {
+				shouldFailover = false
+				if !invalidPromptNoFailoverLogged {
+					logOpenAIOAuthInvalidPromptNoFailover(ctx, account, upstreamMessage, eventType, "ws_http_bridge", resp.Header.Get("x-request-id"))
+					invalidPromptNoFailoverLogged = true
 				}
 			}
 			requestScopedCapacity := isOpenAIUpstreamCapacityShedEvent(upstreamMessage)

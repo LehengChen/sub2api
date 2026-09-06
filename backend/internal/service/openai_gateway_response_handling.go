@@ -255,6 +255,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	terminalEventType := ""
 	responsesSemanticOutputSeen := false
 	capacityFailoverSuppressedLogged := false
+	invalidPromptNoFailoverLogged := false
 	failedMessage := ""
 	clientOutputStarted := false
 	codexFailureTerminal := account != nil && account.IsOpenAIOAuthLike()
@@ -593,6 +594,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
+				invalidPrompt := isOpenAIOAuthInvalidPromptEvent(account, dataBytes, failedMessage)
+				if invalidPrompt && !invalidPromptNoFailoverLogged {
+					logOpenAIOAuthInvalidPromptNoFailover(ctx, account, dataBytes, eventType, "native_sse", upstreamRequestID)
+					invalidPromptNoFailoverLogged = true
+				}
 				clientOutputWritten := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				outputStarted := clientOutputWritten
 				if isOpenAIOAuthAccount(account) {
@@ -619,7 +625,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				}
 				if !outputStarted {
 					shouldFailover := false
-					if !cyberHit {
+					if !cyberHit && !invalidPrompt {
 						if eventType == "error" {
 							shouldFailover = openAIStreamErrorEventShouldFailover(dataBytes, failedMessage)
 						} else {
@@ -1781,7 +1787,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 			return nil, failoverErr
 		}
 		errType := "upstream_error"
-		if isOpenAIOAuthCapacityShedEvent(account, terminalPayload, msg) {
+		if isOpenAIOAuthInvalidPromptEvent(account, terminalPayload, msg) {
+			errType = "invalid_prompt"
+		} else if isOpenAIOAuthCapacityShedEvent(account, terminalPayload, msg) {
 			errType = "server_error"
 			msg = openAIOAuthCapacityClientMessage
 		}

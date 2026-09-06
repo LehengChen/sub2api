@@ -1390,6 +1390,52 @@ func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
 	return false
 }
 
+const openAIInvalidPromptPolicyMessagePrefix = "invalid prompt: your prompt was flagged as potentially violating our usage policy. please try again with a different prompt"
+
+func openAIInvalidPromptMatch(payload []byte, message string) string {
+	for _, path := range []string{"response.error.type", "response.error.code", "error.type", "error.code"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), "invalid_prompt") {
+			return "structured"
+		}
+	}
+	for _, candidate := range []string{
+		message,
+		gjson.GetBytes(payload, "response.error.message").String(),
+		gjson.GetBytes(payload, "error.message").String(),
+		gjson.GetBytes(payload, "message").String(),
+	} {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(candidate)), openAIInvalidPromptPolicyMessagePrefix) {
+			return "message"
+		}
+	}
+	return ""
+}
+
+func isOpenAIOAuthInvalidPromptEvent(account *Account, payload []byte, message string) bool {
+	return isOpenAIOAuthAccount(account) && openAIInvalidPromptMatch(payload, message) != ""
+}
+
+func logOpenAIOAuthInvalidPromptNoFailover(
+	ctx context.Context,
+	account *Account,
+	payload []byte,
+	eventType string,
+	path string,
+	upstreamRequestID string,
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	logger.FromContext(ctx).Info("openai.responses.oauth_invalid_prompt_no_failover",
+		zap.Int64("account_id", account.ID),
+		zap.String("path", path),
+		zap.String("event_type", strings.TrimSpace(eventType)),
+		zap.String("invalid_prompt_match", openAIInvalidPromptMatch(payload, extractOpenAISSEErrorMessage(payload))),
+		zap.String("decision", "return_client_error"),
+		zap.String("upstream_request_id", truncateOpenAIWSLogValue(upstreamRequestID, 120)),
+	)
+}
+
 func logOpenAICapacityFailoverSuppressed(
 	ctx context.Context,
 	account *Account,
@@ -2136,6 +2182,22 @@ func (s *OpenAIGatewayService) nonStreamingTerminalFailureFailover(
 	if account == nil || !isOpenAIOAuthAccount(account) {
 		return nil
 	}
+	if isOpenAIOAuthInvalidPromptEvent(account, payload, message) {
+		requestCtx := context.Background()
+		if c != nil && c.Request != nil {
+			requestCtx = c.Request.Context()
+		}
+		upstreamRequestID := ""
+		if resp != nil {
+			upstreamRequestID = strings.TrimSpace(resp.Header.Get("x-request-id"))
+		}
+		path := "native_sse_to_json"
+		if passthrough {
+			path = "passthrough_sse_to_json"
+		}
+		logOpenAIOAuthInvalidPromptNoFailover(requestCtx, account, payload, terminalType, path, upstreamRequestID)
+		return nil
+	}
 	if isOpenAIOAuthCapacityShedEvent(account, payload, message) {
 		requestCtx := context.Background()
 		if c != nil && c.Request != nil {
@@ -2247,6 +2309,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	terminalEventType := ""
 	semanticOutputSeen := false
 	capacityFailoverSuppressedLogged := false
+	invalidPromptNoFailoverLogged := false
 	failedMessage := ""
 	clientOutputStarted := false
 	codexFailureTerminal := account != nil && account.Platform == PlatformOpenAI
@@ -2488,6 +2551,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
+				invalidPrompt := isOpenAIOAuthInvalidPromptEvent(account, dataBytes, failedMessage)
+				if invalidPrompt && !invalidPromptNoFailoverLogged {
+					logOpenAIOAuthInvalidPromptNoFailover(ctx, account, dataBytes, eventType, "passthrough_sse", upstreamRequestID)
+					invalidPromptNoFailoverLogged = true
+				}
 				clientOutputWritten := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				outputStarted := clientOutputWritten
 				if isOpenAIOAuthAccount(account) {
@@ -2512,7 +2580,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 				if !outputStarted {
 					shouldFailover := false
-					if !cyberHit {
+					if !cyberHit && !invalidPrompt {
 						if eventType == "error" {
 							shouldFailover = openAIStreamErrorEventShouldFailover(dataBytes, failedMessage)
 						} else {
@@ -2807,7 +2875,9 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 			return nil, failoverErr
 		}
 		errType := "upstream_error"
-		if isOpenAIOAuthCapacityShedEvent(account, terminalPayload, msg) {
+		if isOpenAIOAuthInvalidPromptEvent(account, terminalPayload, msg) {
+			errType = "invalid_prompt"
+		} else if isOpenAIOAuthCapacityShedEvent(account, terminalPayload, msg) {
 			errType = "server_error"
 			msg = openAIOAuthCapacityClientMessage
 		}
