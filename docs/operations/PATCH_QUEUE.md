@@ -392,3 +392,29 @@ upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/6712
   request ID, and `decision=return_client_error`; prompt and response bodies are
   not logged. No account cooldown, scheduler, schema, admin setting, migration,
   or infrastructure change is introduced by FZ-015.
+
+## FZ-016: OpenAI OAuth account-level 429 switches immediately
+
+```yaml
+id: FZ-016
+order: 150
+status: reimplement
+applied_commits:
+  - 9dfd64a22440fe830e2d07239876f3ecddedd4c0
+last_reviewed_against: 578785ee7fb35030b094b69624efe25670a36f5f
+upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/issues/6370
+```
+
+- Intent: when OpenAI OAuth returns the observed top-level JSON detail
+  `Rate limit exceeded`, skip the generic two-minute same-account retry window,
+  apply the existing short 429 cooldown, and let the failover loop select a
+  different schedulable account immediately.
+- Detection is deliberately narrow: the trimmed top-level `detail` value must
+  equal the observed sentence case-insensitively. Nested fields, prompt echoes,
+  and similar free text do not match and retain upstream behavior.
+- Scope: OpenAI OAuth and setup-token HTTP/stream terminal 429 handling only.
+  Real quota-reset headers, Spark model-scoped limits, API-key, Grok, capacity,
+  invalid-prompt, and ordinary transient retry behavior remain unchanged.
+- Drop condition: remove this patch once upstream distinguishes the same
+  account-level signal from generic transient 429 and proves immediate account
+  exclusion with the corresponding negative tests.
