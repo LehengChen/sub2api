@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -69,6 +71,13 @@ func classifyOpenAIOAuth429(headers http.Header, responseBody []byte) (openAIOAu
 		return openAIOAuth429QuotaReset, &resetAt
 	}
 	return openAIOAuth429Transient, nil
+}
+
+func isOpenAIOAuthImmediateAccountRateLimit(responseBody []byte) bool {
+	if len(responseBody) == 0 || !gjson.ValidBytes(responseBody) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(gjson.GetBytes(responseBody, "detail").String()), "Rate limit exceeded")
 }
 
 func openAIAccountStateContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -224,7 +233,9 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 	}
 	s.recordOpenAIOAuth429()
 	disposition, resetAt := classifyOpenAIOAuth429(headers, responseBody)
-	if disposition == openAIOAuth429Transient && s.openAIOAuth429RetryWindowActive(account) {
+	if disposition == openAIOAuth429Transient &&
+		!isOpenAIOAuthImmediateAccountRateLimit(responseBody) &&
+		s.openAIOAuth429RetryWindowActive(account) {
 		return
 	}
 

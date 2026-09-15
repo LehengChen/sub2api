@@ -61,6 +61,36 @@ func TestOpenAI429FastPath_KeepsOAuthAccountSchedulableDuringRetryWindow(t *test
 	require.WithinDuration(t, time.Now().Add(openAIOAuth429RetryWindow), svc.openAIOAuth429RetryDeadline(setupTokenAccount), time.Second)
 }
 
+func TestOpenAI429FastPath_ExactDetailRateLimitImmediatelySwitchesOAuthAccount(t *testing.T) {
+	repo := &oauth429RateLimitRepo{}
+	rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	svc := &OpenAIGatewayService{rateLimitService: rateLimits}
+	rateLimits.SetAccountRuntimeBlocker(svc)
+	account := &Account{ID: 46, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	body := []byte(`{"detail":"Rate limit exceeded"}`)
+
+	before := time.Now()
+	shouldDisable := svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, http.Header{}, body)
+	after := time.Now()
+
+	require.False(t, shouldDisable)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.False(t, svc.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(account, http.StatusTooManyRequests, false, http.Header{}, body))
+	require.Equal(t, 1, repo.setRateLimitedCalls)
+	require.False(t, repo.lastRateLimitedUntil.Before(before.Add(openAIOAuth429FallbackCooldown)))
+	require.False(t, repo.lastRateLimitedUntil.After(after.Add(openAIOAuth429FallbackCooldown)))
+}
+
+func TestOpenAI429FastPath_DoesNotMatchNestedOrFreeTextRateLimit(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"error":{"detail":"Rate limit exceeded"}}`),
+		[]byte(`{"error":{"message":"upstream echoed {\\"detail\\":\\"Rate limit exceeded\\"}"}}`),
+		[]byte(`{"detail":"Rate limit exceeded for this prompt"}`),
+	} {
+		require.False(t, isOpenAIOAuthImmediateAccountRateLimit(body), string(body))
+	}
+}
+
 func TestOpenAI429FastPath_BlocksOAuthOnlyAfterRetryWindow(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	account := &Account{ID: 420, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
