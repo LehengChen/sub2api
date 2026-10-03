@@ -496,7 +496,7 @@ func TestOpenAIPassthroughBareCapacityBeforeOutputFailsOver(t *testing.T) {
 	}
 }
 
-func TestOpenAINativeBareCapacityKeepsLegacyBoundaries(t *testing.T) {
+func TestOpenAINativeBareCapacityKeepsUpstreamBoundaries(t *testing.T) {
 	capacity := "event: error\n" + `data: {"error":{"code":"server_is_overloaded"}}` + "\n\n"
 	nonCapacity := "event: error\n" + `data: {"error":{"code":"server_error"}}` + "\n\n"
 	tests := map[string]struct {
@@ -513,15 +513,21 @@ func TestOpenAINativeBareCapacityKeepsLegacyBoundaries(t *testing.T) {
 			rec, _, err := runOpenAINativeCapacityStream(t, tt.account, tt.body, 30)
 
 			require.Error(t, err)
-			require.ErrorContains(t, err, "missing terminal event")
 			var failoverErr *UpstreamFailoverError
-			require.False(t, errors.As(err, &failoverErr))
-			require.Contains(t, rec.Body.String(), `"code":"`+tt.expectedCode+`"`)
+			if tt.expectedCode == "server_is_overloaded" {
+				require.ErrorAs(t, err, &failoverErr)
+				require.False(t, failoverErr.OpenAIOAuthCapacity)
+				require.True(t, failoverErr.RetryableOnSameAccount)
+				require.Empty(t, rec.Body.String())
+			} else {
+				require.False(t, errors.As(err, &failoverErr))
+				require.Contains(t, rec.Body.String(), `"code":"server_error"`)
+			}
 		})
 	}
 }
 
-func TestOpenAIPassthroughBareCapacityKeepsLegacyBoundaries(t *testing.T) {
+func TestOpenAIPassthroughBareCapacityKeepsUpstreamBoundaries(t *testing.T) {
 	capacity := "event: error\n" + `data: {"error":{"code":"server_is_overloaded"}}` + "\n\n"
 	nonCapacity := "event: error\n" + `data: {"error":{"code":"server_error"}}` + "\n\n"
 	for name, tt := range map[string]struct {
@@ -536,10 +542,17 @@ func TestOpenAIPassthroughBareCapacityKeepsLegacyBoundaries(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rec, err := runOpenAIPassthroughCapacityStream(t, tt.account, tt.body)
 
-			require.ErrorContains(t, err, "missing terminal event")
+			require.Error(t, err)
 			var failoverErr *UpstreamFailoverError
-			require.False(t, errors.As(err, &failoverErr))
-			require.Contains(t, rec.Body.String(), `"code":"`+tt.expectedCode+`"`)
+			if tt.expectedCode == "server_is_overloaded" {
+				require.ErrorAs(t, err, &failoverErr)
+				require.False(t, failoverErr.OpenAIOAuthCapacity)
+				require.True(t, failoverErr.RetryableOnSameAccount)
+				require.Empty(t, rec.Body.String())
+			} else {
+				require.False(t, errors.As(err, &failoverErr))
+				require.Contains(t, rec.Body.String(), `"code":"server_error"`)
+			}
 		})
 	}
 }

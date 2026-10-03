@@ -104,6 +104,19 @@ func TestStandbyProvidersDoNotStartBackgroundWorkers(t *testing.T) {
 	}
 	codexSync.Stop()
 
+	claudeSync := ProvideClaudeCodeVersionSyncService(
+		&codexSyncStartProbeRepo{started: codexSyncStarted},
+		&SettingService{},
+		&codexVersionSyncGitHubStub{},
+		fence,
+	)
+	select {
+	case <-codexSyncStarted:
+		t.Fatal("standby started Claude version synchronization")
+	case <-time.After(20 * time.Millisecond):
+	}
+	claudeSync.Stop()
+
 	channelMonitor := ProvideChannelMonitorService(nil, nil, &SettingService{})
 	channelRunner := ProvideChannelMonitorRunner(channelMonitor, &SettingService{}, nil, fence)
 	require.False(t, channelRunner.started, "standby started channel monitor runner")

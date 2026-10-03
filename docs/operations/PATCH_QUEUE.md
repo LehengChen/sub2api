@@ -4,7 +4,36 @@ This file records runtime differences carried by the Frenzy candidate relative
 to the upstream release. Upstreamed fixes are recorded so they are not replayed
 as local patches during the next sync.
 
-## v0.2.1 baseline
+## v0.2.13 baseline
+
+- Upstream tag: `v0.2.13`, peeled commit
+  `3040209f205472038c1ba745a1bedd2edd9053b1`.
+- Integrated from the deployed v0.2.1 source, not from an undeployed hotfix
+  branch. The September OAuth 429 patch `9dfd64a22` remains separate: this
+  upgrade does not silently introduce its different retry policy.
+- The upstream VERSION file still says 0.2.12; normalize it to 0.2.13 and
+  inject the exact candidate commit in release builds.
+- FZ-001 through FZ-015 remain carried. Dependency pins retain the newer
+  local security versions; Wire is regenerated from the combined providers.
+- FZ-007 also fences Claude version synchronization, OpenCode Go usage,
+  automatic OpenAI quota reset and CN-provider periodic checks. Standby
+  must not start these workers. The upstream simple-mode startup helper is
+  retained only for roles that permit bootstrap writes.
+- FZ-010/013 keep immediate OAuth capacity account switching, two-minute
+  cooldown and generic post-output errors. Adopt upstream SSE event-header
+  fallback for ordinary errors; the former missing-terminal behavior for
+  a JSON body without `type` was a parser defect, not a retry guarantee.
+  Preserve upstream bare-error staging until the terminal event, retain its
+  usage, and normalize only the client-facing failure. Native and passthrough
+  regression tests cover the error/failed pair and terminal token accounting.
+- FZ-014 keeps bounded batch usage statistics while retaining upstream's
+  protection against clearing authentication errors from a cached snapshot.
+- Ten new migration files (235 through 241, including duplicate numeric
+  prefixes) are unchanged from upstream. The group-column rename and pricing
+  backfill are not N/N-1 compatible; an image-only rollback is not valid.
+  Source integration is not authorization to migrate or switch production.
+
+### Prior v0.2.1 baseline (historical)
 
 - Upstream tag: `v0.2.1`
 - Upstream peeled commit: `578785ee7fb35030b094b69624efe25670a36f5f`
@@ -260,10 +289,11 @@ upstream_issue_or_pr: https://github.com/Wei-Shaw/sub2api/pull/5398
   the JSON data has no `type` field.
 - Scheduling invariant: OpenAI OAuth capacity sets
   `RetryableOnSameAccount=false`; API-key, Grok, and non-capacity errors retain
-  their previous retry/flush behavior.
+  their upstream v0.2.13 retry/flush behavior.
 - Compatibility invariant: `response.created`/`response.in_progress`/
-  `response.output_item.added` EOF, API-key/Grok/non-capacity errors, and the WS
-  bridge retain their prior behavior. Post-semantic capacity is rewritten to a
+  `response.output_item.added` EOF and the WS bridge retain their prior behavior.
+  API-key/Grok/non-capacity errors follow the upstream parser, including its
+  SSE event-header fallback. Post-semantic capacity is rewritten to a
   generic retryable error without replay. No config, migration, or infra change
   is part of FZ-010.
 - Evidence boundary: service tests cover native and passthrough bare-header and

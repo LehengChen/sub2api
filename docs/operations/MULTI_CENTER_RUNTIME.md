@@ -60,8 +60,9 @@ SUB2API_WORKER_LEASE_RENEW_SECONDS=10
 `standby` 的 `/livez` 可以为 200，但 `/readyz` 必须为 503。这能防止误把冷 standby 注册到 ALB。提升 standby 时应先以 `active` 配置重启、取得新 fencing token、连续通过 readiness 和认证 synthetic，再注册流量。
 
 standby provider 门控已覆盖邮件队列、billing-cache 异步写队列、content moderation、
-subscription maintenance/invalidation、usage-record pool，以及 upstream billing/Ollama
-周期探测；测试只证明这些启动任务不会在 standby 创建。请求路径中的临时 goroutine 和
+subscription maintenance/invalidation、usage-record pool，以及 upstream billing/Ollama/
+OpenCode Go 周期探测、Claude 版本同步、OpenAI 自动额度重置和国产供应商周期检查。
+测试只证明这些启动任务不会在 standby 创建。请求路径中的临时 goroutine 和
 尚未接入条件写入的后台副作用仍不构成完整 fencing 证明。
 
 ## 人工切换顺序

@@ -179,17 +179,10 @@ func initEntWithRuntime(cfg *config.Config, control runtimecontrol.Control) (*en
 		return nil, nil, fmt.Errorf("validate config after secret bootstrap: %w", err)
 	}
 
-	// SIMPLE 模式：启动时补齐各平台默认分组。
-	// - anthropic/openai/gemini: 确保存在 <platform>-default
-	// - antigravity: 仅要求存在 >=2 个未软删除分组（用于 claude/gemini 混合调度场景）
-	if cfg.RunMode == config.RunModeSimple && control.AllowsBootstrapWrites() {
+	if control.AllowsBootstrapWrites() {
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer seedCancel()
-		if err := ensureSimpleModeDefaultGroups(seedCtx, client); err != nil {
-			_ = client.Close()
-			return nil, nil, err
-		}
-		if err := ensureSimpleModeAdminConcurrency(seedCtx, client); err != nil {
+		if err := ensureSimpleModeStartup(seedCtx, client, cfg); err != nil {
 			_ = client.Close()
 			return nil, nil, err
 		}
@@ -229,4 +222,17 @@ func RunMigrations(ctx context.Context, cfg *config.Config) error {
 	defer func() { _ = drv.Close() }()
 	applyDBPoolSettings(drv.DB(), cfg)
 	return applyMigrationsFS(ctx, drv.DB(), migrations.FS)
+}
+
+// ensureSimpleModeStartup keeps admin concurrency setup independent of group seeding.
+func ensureSimpleModeStartup(ctx context.Context, client *ent.Client, cfg *config.Config) error {
+	if cfg.RunMode != config.RunModeSimple {
+		return nil
+	}
+	if cfg.SimpleMode.AutoCreateDefaultGroups {
+		if err := ensureSimpleModeDefaultGroups(ctx, client); err != nil {
+			return err
+		}
+	}
+	return ensureSimpleModeAdminConcurrency(ctx, client)
 }

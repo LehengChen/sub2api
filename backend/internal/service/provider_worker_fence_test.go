@@ -22,4 +22,7 @@ func TestPeriodicAccountProbesStayStoppedOnStandby(t *testing.T) {
 
 	ollama := ProvideOllamaCloudUsageService(nil, nil, nil, nil, &config.Config{}, nil, nil, fence)
 	require.False(t, ollama.started)
+
+	opencode := ProvideOpenCodeGoUsageService(nil, nil, nil, nil, nil, fence)
+	require.False(t, opencode.started)
 }
