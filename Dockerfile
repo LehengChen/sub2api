@@ -119,6 +119,8 @@ RUN apk add --no-cache \
     ca-certificates \
     tzdata \
     su-exec \
+    'libcrypto3>=3.3.7-r2' \
+    'libssl3>=3.3.7-r2' \
     libpq \
     zstd-libs \
     lz4-libs \
