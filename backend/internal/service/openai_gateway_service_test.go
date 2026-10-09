@@ -1762,9 +1762,9 @@ func TestOpenAIStreamingResponseFailedBeforeOutputRateLimitUsesPoolRetryPolicy(t
 	require.Equal(t, http.StatusTooManyRequests, opsEvents[len(opsEvents)-1].UpstreamStatusCode)
 }
 
-// 流内 rate limit 只产生 failover 错误，不写账号级限流/封禁状态：
-// HTTP 200 流的 x-codex-* 头是正常配额快照，不能按 429 头驱动账号冷却。
-func TestOpenAIStreamingResponseFailedRateLimitDoesNotBlockAccountScheduling(t *testing.T) {
+// OAuth 流内明确的账号并发容量错误需要进入容量冷却；HTTP 200 流的
+// x-codex-* 头仍然不会单独驱动账号冷却。
+func TestOpenAIStreamingResponseFailedOAuthConcurrencyCapacityBlocksAccountScheduling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -1808,7 +1808,9 @@ func TestOpenAIStreamingResponseFailedRateLimitDoesNotBlockAccountScheduling(t *
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 	require.False(t, failoverErr.RetryableOnSameAccount)
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.True(t, failoverErr.OpenAIOAuthCapacity)
+	require.True(t, failoverErr.RequestScopedTransient)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
 func TestOpenAIStreamingResponseFailedAfterOutputSanitizesVerboseResponseForClient(t *testing.T) {

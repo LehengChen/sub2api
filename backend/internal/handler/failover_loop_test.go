@@ -73,6 +73,31 @@ func TestNewFailoverState(t *testing.T) {
 	})
 }
 
+func TestRecordAccountSlotTimeoutUsesSwitchBudget(t *testing.T) {
+	fs := NewFailoverState(2, false)
+
+	require.Equal(t, FailoverContinue, fs.RecordAccountSlotTimeout(101))
+	require.Equal(t, 1, fs.SwitchCount)
+	require.Contains(t, fs.FailedAccountIDs, int64(101))
+	require.True(t, fs.HasAccountSlotTimeout())
+
+	require.Equal(t, FailoverContinue, fs.RecordAccountSlotTimeout(102))
+	require.Equal(t, 2, fs.SwitchCount)
+	require.Contains(t, fs.FailedAccountIDs, int64(102))
+
+	require.Equal(t, FailoverExhausted, fs.RecordAccountSlotTimeout(103))
+	require.Equal(t, 2, fs.SwitchCount)
+	require.Contains(t, fs.FailedAccountIDs, int64(103))
+}
+
+func TestHandleSelectionExhaustedDoesNotBackoffAfterSlotTimeout(t *testing.T) {
+	fs := NewFailoverState(3, false)
+	fs.RecordAccountSlotTimeout(101)
+	fs.LastFailoverErr = newTestFailoverErr(http.StatusServiceUnavailable, false, false)
+
+	require.Equal(t, FailoverExhausted, fs.HandleSelectionExhausted(context.Background()))
+}
+
 // ---------------------------------------------------------------------------
 // sleepWithContext 测试
 // ---------------------------------------------------------------------------

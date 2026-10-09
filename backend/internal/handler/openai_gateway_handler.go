@@ -431,6 +431,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
+	slotTimeoutSeen := false
 
 	// 生图意图的 /v1/responses 请求必须调度到确实支持 Responses API 的账号，否则
 	// 会在 forward 阶段被静默降级为无法生图的 Chat Completions 直转（#4417）。
@@ -472,6 +473,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
+				return
+			}
+			if slotTimeoutSeen && (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) {
+				h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, "account", streamStarted)
 				return
 			}
 			reqLog.Warn("openai.account_select_failed",
@@ -531,6 +536,19 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
 				return
 			}
+			continue
+		}
+		if slotResult == openAISlotAcquireTimedOut {
+			slotTimeoutSeen = true
+			if !recordOpenAISlotTimeout(failedAccountIDs, account.ID, &switchCount, maxAccountSwitches) {
+				h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, "account", streamStarted)
+				return
+			}
+			reqLog.Warn("openai.account_slot_timeout_reselect",
+				zap.Int64("account_id", account.ID),
+				zap.Int("switch_count", switchCount),
+				zap.Int("max_switches", maxAccountSwitches),
+			)
 			continue
 		}
 		if slotResult != openAISlotAcquireOK {
@@ -1012,6 +1030,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	effectiveMappedModel := preferredMappedModel
+	slotTimeoutSeen := false
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
 	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
@@ -1043,6 +1062,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai_messages.account_select_aborted_client_disconnected", zap.Error(err))
+				return
+			}
+			if slotTimeoutSeen && errors.Is(err, service.ErrNoAvailableAccounts) {
+				h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, "account", streamStarted)
 				return
 			}
 			reqLog.Warn("openai_messages.account_select_failed",
@@ -1089,6 +1112,19 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
 				return
 			}
+			continue
+		}
+		if slotResult == openAISlotAcquireTimedOut {
+			slotTimeoutSeen = true
+			if !recordOpenAISlotTimeout(failedAccountIDs, account.ID, &switchCount, maxAccountSwitches) {
+				h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, "account", streamStarted)
+				return
+			}
+			reqLog.Warn("openai.messages.account_slot_timeout_reselect",
+				zap.Int64("account_id", account.ID),
+				zap.Int("switch_count", switchCount),
+				zap.Int("max_switches", maxAccountSwitches),
+			)
 			continue
 		}
 		if slotResult != openAISlotAcquireOK {
@@ -1392,6 +1428,9 @@ const (
 	// 未写任何响应；调用方应经 recordOpenAIProfitVeto 把该账号加入本请求排除集
 	// 后重新选号，全池耗尽由下一轮选号返回标准 no available accounts。
 	openAISlotAcquireProfitVetoed
+	// openAISlotAcquireTimedOut：账号等待超时，尚未写响应；调用方应排除当前账号
+	// 并在现有切换预算内重新选号。
+	openAISlotAcquireTimedOut
 )
 
 // openAIWSTurnPricing 持有 WebSocket 连接内「当前 turn」的计费定价时刻。
@@ -1433,6 +1472,17 @@ func recordOpenAIProfitVeto(failedAccountIDs map[int64]struct{}, accountID int64
 	failedAccountIDs[accountID] = struct{}{}
 	*vetoCount++
 	return *vetoCount < maxProfitVetoAttempts
+}
+
+// recordOpenAISlotTimeout excludes a saturated account for this request and
+// reuses the existing account-switch budget to bound reselection.
+func recordOpenAISlotTimeout(failedAccountIDs map[int64]struct{}, accountID int64, switchCount *int, maxSwitches int) bool {
+	failedAccountIDs[accountID] = struct{}{}
+	if *switchCount >= maxSwitches {
+		return false
+	}
+	(*switchCount)++
+	return true
 }
 
 // handleOpenAIProfitVetoExhausted 在利润否决预算耗尽时写出错误响应。
@@ -1554,6 +1604,9 @@ func (h *OpenAIGatewayHandler) acquireResponsesAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		if isAccountSlotTimeout(err) {
+			return nil, openAISlotAcquireTimedOut
+		}
 		h.handleConcurrencyError(c, err, "account", *streamStarted)
 		return nil, openAISlotAcquireFailed
 	}

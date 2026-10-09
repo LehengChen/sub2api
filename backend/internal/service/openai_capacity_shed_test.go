@@ -118,6 +118,9 @@ func TestOpenAIOAuthCapacityShedEventRecognizesOnlyKnownSignals(t *testing.T) {
 		"observed overload message": {
 			payload: []byte(`{"type":"response.failed","error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}`),
 		},
+		"oauth account concurrency capacity message": {
+			payload: []byte(`{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for account, please retry later"}}}`),
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

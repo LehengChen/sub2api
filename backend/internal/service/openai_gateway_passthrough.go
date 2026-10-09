@@ -856,9 +856,10 @@ func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
 }
 
 const (
-	openAIUpstreamOverloadMessage    = "Our servers are currently overloaded. Please try again later."
-	openAIOAuthCapacityClientMessage = "Upstream service is temporarily unavailable. Please retry."
-	openAIOAuthCapacityCooldown      = 2 * time.Minute
+	openAIUpstreamOverloadMessage        = "Our servers are currently overloaded. Please try again later."
+	openAIOAuthCapacityClientMessage     = "Upstream service is temporarily unavailable. Please retry."
+	openAIOAuthConcurrencyCapacityMarker = "concurrency limit exceeded for account"
+	openAIOAuthCapacityCooldown          = 2 * time.Minute
 )
 
 func OpenAIOAuthCapacityClientMessage() string {
@@ -867,7 +868,9 @@ func OpenAIOAuthCapacityClientMessage() string {
 
 func isOpenAIUpstreamCapacityMessage(message string) bool {
 	trimmed := strings.TrimSpace(message)
-	return strings.Contains(strings.ToLower(trimmed), "selected model is at capacity") ||
+	lower := strings.ToLower(trimmed)
+	return strings.Contains(lower, "selected model is at capacity") ||
+		strings.Contains(lower, openAIOAuthConcurrencyCapacityMarker) ||
 		strings.EqualFold(trimmed, openAIUpstreamOverloadMessage)
 }
 

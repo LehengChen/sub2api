@@ -316,6 +316,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		for {
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 			if err != nil {
+				if fs.HasAccountSlotTimeout() && c.Request.Context().Err() == nil && errors.Is(err, service.ErrNoAvailableAccounts) {
+					h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, "account", streamStarted)
+					return
+				}
 				if len(fs.FailedAccountIDs) == 0 {
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, service.PlatformGemini)
 					if !cls.ModelNotFound {
@@ -418,6 +422,16 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
+					if isAccountSlotTimeout(err) {
+						if fs.RecordAccountSlotTimeout(account.ID) == FailoverContinue {
+							reqLog.Warn("gateway.account_slot_timeout_reselect",
+								zap.Int64("account_id", account.ID),
+								zap.Int("switch_count", fs.SwitchCount),
+								zap.Int("max_switches", fs.MaxSwitches),
+							)
+							continue
+						}
+					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
 					return
 				}
@@ -628,6 +642,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			)
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
 			if err != nil {
+				if fs.HasAccountSlotTimeout() && c.Request.Context().Err() == nil && errors.Is(err, service.ErrNoAvailableAccounts) {
+					h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, "account", streamStarted)
+					return
+				}
 				if len(fs.FailedAccountIDs) == 0 {
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform)
 					if !cls.ModelNotFound {
@@ -741,6 +759,16 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
+					if isAccountSlotTimeout(err) {
+						if fs.RecordAccountSlotTimeout(account.ID) == FailoverContinue {
+							reqLog.Warn("gateway.account_slot_timeout_reselect",
+								zap.Int64("account_id", account.ID),
+								zap.Int("switch_count", fs.SwitchCount),
+								zap.Int("max_switches", fs.MaxSwitches),
+							)
+							continue
+						}
+					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
 					return
 				}

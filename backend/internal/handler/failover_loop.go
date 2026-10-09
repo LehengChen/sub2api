@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -70,6 +71,9 @@ type FailoverState struct {
 	profitVetoedAccountIDs map[int64]struct{}
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
 	profitVetoCount int
+	// slotTimeoutSeen 表示本次请求曾因账号槽位等待超时。槽位超时只是本次请求的
+	// 局部排除，不应触发账号级临时封禁，也不应被单账号 503 退避逻辑重新放回候选池。
+	slotTimeoutSeen bool
 }
 
 // NewFailoverState 创建 failover 状态
@@ -104,6 +108,31 @@ func (s *FailoverState) RecordProfitVeto(accountID int64) FailoverAction {
 
 // ProfitVetoCount 返回本次请求累计的利润否决次数（供日志使用）。
 func (s *FailoverState) ProfitVetoCount() int { return s.profitVetoCount }
+
+// RecordAccountSlotTimeout 记录一次账号槽位等待超时，并把账号排除在本次请求之外。
+// 复用现有的账号切换预算，防止「选号 → 等待超时 → 重新选号」无限循环。
+// 与 HandleFailoverError 不同，这里不会临时封禁账号：槽位拥塞是瞬时请求级状态，
+// 不能据此改变账号的全局调度状态。
+func (s *FailoverState) RecordAccountSlotTimeout(accountID int64) FailoverAction {
+	s.FailedAccountIDs[accountID] = struct{}{}
+	s.slotTimeoutSeen = true
+	if s.SwitchCount >= s.MaxSwitches {
+		return FailoverExhausted
+	}
+	s.SwitchCount++
+	return FailoverContinue
+}
+
+// HasAccountSlotTimeout reports whether this request has already skipped an account
+// because its local concurrency slot wait timed out.
+func (s *FailoverState) HasAccountSlotTimeout() bool { return s.slotTimeoutSeen }
+
+// isAccountSlotTimeout identifies only the bounded wait timeout. Redis/internal
+// errors and client cancellation keep their existing immediate-error behavior.
+func isAccountSlotTimeout(err error) bool {
+	var concurrencyErr *ConcurrencyError
+	return errors.As(err, &concurrencyErr) && concurrencyErr.IsTimeout
+}
 
 // allExclusionsAreProfitVetoed 判断排除列表是否已全部由利润门否决贡献。
 // 此时清空 FailedAccountIDs 会被原样恢复，退避重试不会带来任何新候选。
@@ -206,6 +235,11 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 	// 不代表账号耗尽，直接按取消终止。
 	if ctx.Err() != nil {
 		return FailoverCanceled
+	}
+	// A slot timeout already consumed the request's wait budget. Do not enter the
+	// single-account 503 backoff path and select the same saturated account again.
+	if s.slotTimeoutSeen {
+		return FailoverExhausted
 	}
 
 	if s.LastFailoverErr != nil &&
