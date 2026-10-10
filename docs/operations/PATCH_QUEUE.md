@@ -4,6 +4,33 @@ This file records runtime differences carried by the Frenzy candidate relative
 to the upstream release. Upstreamed fixes are recorded so they are not replayed
 as local patches during the next sync.
 
+## FZ-016: bounded OAuth rate-limit and capacity recovery
+
+- Base: deployed v0.2.13 commit `05f2c18b5d57bd93c6daaded5cef4b9c16cc2ba4`.
+- Ordinary OAuth/SetupToken 429s immediately use the existing configurable
+  cooldown (or upstream `Retry-After`) and switch accounts. Remove the shared
+  two-minute same-account retry window. Explicit quota reset handling stays
+  intact; a cached 100% weekly quota alone does not disable credit-funded use.
+- HTTP 503 and recognized HTTP overloads use the existing OAuth capacity
+  cooldown and switch policy, matching SSE overload handling. API-key and
+  other-provider retry policies remain unchanged.
+- OAuth `Concurrency limit exceeded for account` is explicitly recognized
+  even without a structured error code, in both HTTP and stream errors.
+- Responses, Chat Completions and Messages admission can skip an OAuth
+  account after its queue fills or times out. Reuse the request's switch
+  budget and allow only one full queue wait. Cancellation and infrastructure
+  errors terminate normally; account-local contention does not disable it.
+- Existing semantic-output safeguards still prevent replay after content is
+  delivered. No schema, frontend feature or runtime-config changes;
+  image-only rollback to this v0.2.13 base is compatible.
+- Build with Go 1.27.2 and x/net 0.60.0 security fixes identified by the
+  release scan; x/tools 0.50.0 supports that compiler's export format.
+  Keep the Sub2API version and application feature set fixed.
+- Pin Vue 3.5.42 and source-map-js 1.2.2 to clear the release dependency
+  audit's two High findings without changing frontend functionality.
+- Regression evidence: `openai_capacity_failover_test.go`,
+  `openai_slot_failover_test.go`, and the updated OAuth 429 service tests.
+
 ## v0.2.13 baseline
 
 - Upstream tag: `v0.2.13`, peeled commit

@@ -2025,9 +2025,9 @@ func TestOpenAIStreamingResponseFailedBeforeOutputRateLimitUsesPoolRetryPolicy(t
 	require.Equal(t, http.StatusTooManyRequests, opsEvents[len(opsEvents)-1].UpstreamStatusCode)
 }
 
-// 流内 rate limit 进入 OAuth 同账号重试窗口，但不立即写账号级限流/封禁状态：
-// HTTP 200 流的 x-codex-* 头不能让窗口内的账号提前失去调度资格。
-func TestOpenAIStreamingResponseFailedRateLimitDoesNotBlockAccountScheduling(t *testing.T) {
+// A semantic 429 switches OAuth accounts with a short cooldown, without
+// interpreting successful HTTP 200 quota headers as a week-long block.
+func TestOpenAIStreamingResponseFailedRateLimitCoolsAndSwitchesAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -2049,7 +2049,7 @@ func TestOpenAIStreamingResponseFailedRateLimitDoesNotBlockAccountScheduling(t *
 			`data: {"type":"response.created","response":{"id":"resp_1"}}`,
 			"",
 			"event: response.failed",
-			`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for account, please retry later"}}}`,
+			`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded for account, please retry later"}}}`,
 			"",
 		}, "\n"))),
 		Header: http.Header{
@@ -2070,9 +2070,10 @@ func TestOpenAIStreamingResponseFailedRateLimitDoesNotBlockAccountScheduling(t *
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
-	require.True(t, failoverErr.RetryableOnSameAccount)
-	require.False(t, failoverErr.SameAccountRetryDeadline.IsZero())
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.True(t, failoverErr.SameAccountRetryDeadline.IsZero())
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.WithinDuration(t, time.Now().Add(5*time.Second), svc.peekOpenAIAccountRuntimeBlock(account).until, time.Second)
 }
 
 func TestOpenAIStreamingResponseFailedAfterOutputSanitizesVerboseResponseForClient(t *testing.T) {

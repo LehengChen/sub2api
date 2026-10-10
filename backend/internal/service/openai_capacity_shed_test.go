@@ -111,6 +111,9 @@ func TestOpenAIOAuthCapacityShedEventRecognizesOnlyKnownSignals(t *testing.T) {
 		"structured code": {
 			payload: []byte(`{"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}`),
 		},
+		"account concurrency without code": {
+			payload: []byte(`{"type":"response.failed","response":{"error":{"message":"Concurrency limit exceeded for account, please retry later"}}}`),
+		},
 		"issue capacity message": {
 			payload: []byte(`{"type":"response.failed","error":{"type":"invalid_request_error"}}`),
 			message: "Selected model is at capacity. Please try a different model.",

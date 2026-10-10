@@ -282,6 +282,9 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Acc
 	if s.shouldFailoverUpstreamError(statusCode) {
 		return true
 	}
+	if isOpenAIOAuthCapacityShedEvent(account, upstreamBody, upstreamMsg) {
+		return true
+	}
 	return isOpenAITransientProcessingError(statusCode, upstreamMsg, upstreamBody)
 }
 
@@ -372,30 +375,15 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverError(
 	shouldDisable bool,
 	retryableOnSameAccount bool,
 ) *UpstreamFailoverError {
-	return s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, responseHeaders, responseHeaders, responseBody, upstreamMsg, shouldDisable, retryableOnSameAccount)
-}
-
-func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHeaders(
-	account *Account,
-	statusCode int,
-	responseHeaders http.Header,
-	classificationHeaders http.Header,
-	responseBody []byte,
-	upstreamMsg string,
-	shouldDisable bool,
-	retryableOnSameAccount bool,
-) *UpstreamFailoverError {
-	oauth429Retry := s.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(account, statusCode, shouldDisable, classificationHeaders, responseBody)
 	failoverErr := newOpenAIUpstreamFailoverError(
 		statusCode,
 		responseHeaders,
 		responseBody,
 		upstreamMsg,
-		retryableOnSameAccount || oauth429Retry,
+		retryableOnSameAccount,
 	)
-	if oauth429Retry {
-		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
-		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
+	if isOpenAIOAuthAccount(account) && (statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable || isOpenAIOAuthCapacityShedEvent(account, responseBody, upstreamMsg)) {
+		failoverErr.RetryableOnSameAccount = false
 	}
 	return failoverErr
 }

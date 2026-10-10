@@ -647,6 +647,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
+	slotFailover := &openAISlotFailover{excluded: failedAccountIDs, switches: &switchCount, maxSwitches: maxAccountSwitches}
 
 	// 生图意图的 /v1/responses 请求必须调度到确实支持 Responses API 的账号，否则
 	// 会在 forward 阶段被静默降级为无法生图的 Chat Completions 直转（#4417）。
@@ -709,7 +710,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			}
-			if lastFailoverErr != nil {
+			if slotFailover.lastError != nil {
+				h.handleConcurrencyError(c, slotFailover.lastError, "account", streamStarted)
+			} else if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
@@ -764,7 +767,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
-		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog, slotFailover)
+		if slotResult == openAISlotAcquireBusy {
+			continue
+		}
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
@@ -1291,6 +1297,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	effectiveMappedModel := preferredMappedModel
+	slotFailover := &openAISlotFailover{excluded: failedAccountIDs, switches: &switchCount, maxSwitches: maxAccountSwitches}
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
 	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
@@ -1338,7 +1345,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			} else {
-				if lastFailoverErr != nil {
+				if slotFailover.lastError != nil {
+					status, errType, _, message := concurrencyErrorResponse(slotFailover.lastError, "account")
+					h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
+				} else if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
 					h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
@@ -1360,7 +1370,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		_ = scheduleDecision
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
-		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog, slotFailover)
+		if slotResult == openAISlotAcquireBusy {
+			continue
+		}
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
@@ -2084,11 +2097,13 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 	return wrapReleaseOnDone(ctx, userReleaseFunc), true
 }
 
-// openAISlotAcquireResult 是账号槽位获取的三态结果。
+// openAISlotAcquireResult describes admission or a bounded reselection.
 type openAISlotAcquireResult int
 
 const (
 	openAISlotAcquireOK openAISlotAcquireResult = iota
+	// openAISlotAcquireBusy: request-local exclusion recorded; caller reselects.
+	openAISlotAcquireBusy
 	// openAISlotAcquireFailed：错误响应已写出，调用方直接 return。
 	openAISlotAcquireFailed
 	// openAISlotAcquireProfitVetoed：槽位获取成功后利润终检否决。槽位已释放、
@@ -2161,8 +2176,9 @@ func (h *OpenAIGatewayHandler) acquireResponsesAccountSlot(
 	reqStream bool,
 	streamStarted *bool,
 	reqLog *zap.Logger,
+	failovers ...*openAISlotFailover,
 ) (func(), openAISlotAcquireResult) {
-	return h.acquireOpenAIAccountSlot(c, groupID, sessionHash, selection, reqStream, streamStarted, reqLog, nil)
+	return h.acquireOpenAIAccountSlot(c, groupID, sessionHash, selection, reqStream, streamStarted, reqLog, nil, failovers...)
 }
 
 type openAISlotErrorWriter func(status int, errType, code, message string)
@@ -2179,7 +2195,15 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	streamStarted *bool,
 	reqLog *zap.Logger,
 	writeError openAISlotErrorWriter,
+	failovers ...*openAISlotFailover,
 ) (func(), openAISlotAcquireResult) {
+	var failover *openAISlotFailover
+	if len(failovers) > 0 {
+		failover = failovers[0]
+	}
+	if failover != nil {
+		failover.lastError = nil
+	}
 	if writeError == nil {
 		writeError = func(status int, errType, code, message string) {
 			h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, *streamStarted, false)
@@ -2251,6 +2275,15 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		return wrapReleaseOnDone(ctx, fastReleaseFunc), openAISlotAcquireOK
 	}
 
+	if failover != nil && failover.skipWait && account.IsOpenAIOAuthLike() {
+		err := &ConcurrencyError{SlotType: "account"}
+		if failover.retry(c, account, err) {
+			return nil, openAISlotAcquireBusy
+		}
+		status, errType, code, message := concurrencyErrorResponse(err, "account")
+		writeError(status, errType, code, message)
+		return nil, openAISlotAcquireFailed
+	}
 	canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(ctx, account.ID, selection.WaitPlan.MaxWaiting)
 	if waitErr != nil {
 		reqLog.Warn("openai.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(waitErr))
@@ -2259,6 +2292,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 			zap.Int64("account_id", account.ID),
 			zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
 		)
+		if failover.retry(c, account, &WaitQueueFullError{SlotType: "account"}) {
+			return nil, openAISlotAcquireBusy
+		}
 		writeError(http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later")
 		return nil, openAISlotAcquireFailed
 	}
@@ -2271,6 +2307,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		}
 	}
 	defer releaseWait()
+	if failover != nil && account.IsOpenAIOAuthLike() {
+		failover.skipWait = true
+	}
 
 	accountReleaseFunc, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
 		c,
@@ -2282,6 +2321,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		if failover.retry(c, account, err) {
+			return nil, openAISlotAcquireBusy
+		}
 		status, errType, code, message := concurrencyErrorResponse(err, "account")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed

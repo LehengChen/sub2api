@@ -1161,16 +1161,6 @@ func (s *RateLimitService) handleCustomErrorCode(ctx context.Context, account *A
 // handle429 处理429限流错误
 // 解析响应头获取重置时间，标记账号为限流状态
 func (s *RateLimitService) handle429(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
-	// OpenAI OAuth stays on the same account for the gateway's bounded retry
-	// window. Persisting a rate-limit reset on the first 429 would make the next
-	// retry ineligible and silently turn same-account recovery into a switch.
-	if account != nil && isOpenAIOAuthAccount(account) && s.runtimeBlocker != nil {
-		if checker, ok := s.runtimeBlocker.(interface {
-			ShouldRetryOpenAIOAuth429(*Account, http.Header, []byte) bool
-		}); ok && checker.ShouldRetryOpenAIOAuth429(account, headers, responseBody) {
-			return
-		}
-	}
 	// Spark 影子：限流/熔断状态 100% 由 QueryUsage(/wham/usage body 的 codex_bengalfox)驱动。
 	// /responses 的 429 携带的 x-codex-*/usage_limit_reached 是 global codex 道(plan/spec §8),
 	// 套到影子会把 spark 误耦合到 global 窗口——即便 spark 仍有配额也会被冷却到 global reset,
@@ -1263,6 +1253,18 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 					return
 				}
 				slog.Info("account_rate_limited", "account_id", account.ID, "platform", account.Platform, "reset_at", resetTime, "reset_in", time.Until(resetTime).Truncate(time.Second))
+				return
+			}
+		}
+
+		// A provider retry deadline also applies to new requests, not just this
+		// request's retries. Persist it so scheduler snapshots retain the cooldown.
+		if isOpenAIOAuthAccount(account) {
+			if resetAt := parseRetryAfterResetTime(headers, time.Now()); resetAt != nil && resetAt.After(time.Now()) {
+				s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
+				if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+				}
 				return
 			}
 		}

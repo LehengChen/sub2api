@@ -48,6 +48,32 @@ func TestOpenAIHTTPCapacityShedIsRequestScopedForOAuthAccounts(t *testing.T) {
 	require.Zero(t, repo.tempUnschedCalls)
 }
 
+func TestOpenAIOAuthHTTPCapacityCoolsAndSwitchesAccount(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{503, `{"error":{"message":"Service unavailable"}}`},
+		{503, `{"error":{"code":"server_is_overloaded","message":"overloaded"}}`},
+		{400, `{"error":{"message":"Our servers are currently overloaded. Please try again later."}}`},
+		{400, `{"error":{"message":"Concurrency limit exceeded for account, please retry later"}}`},
+		{429, `{"error":{"message":"Concurrency limit exceeded for account, please retry later"}}`},
+	} {
+		repo := &capacityShedAccountRepoStub{}
+		svc := &OpenAIGatewayService{accountRepo: repo}
+		account := &Account{ID: 71, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+		disabled := svc.handleOpenAIAccountUpstreamError(context.Background(), account, tc.status, nil, []byte(tc.body))
+		err := svc.newOpenAIAccountFailoverError(account, tc.status, nil, []byte(tc.body), "", disabled, true)
+		require.False(t, disabled)
+		require.False(t, err.RetryableOnSameAccount)
+		require.True(t, err.ShouldRetryNextAccount())
+		require.Equal(t, 1, repo.extendCalls)
+		require.Equal(t, account.ID, repo.overloadAccount)
+		require.WithinDuration(t, time.Now().Add(2*time.Minute), repo.overloadUntil, time.Second)
+		require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	}
+}
+
 func TestOpenAIStreamErrorFrameDoesNotStartClientOutput(t *testing.T) {
 	cases := []struct {
 		data      string
