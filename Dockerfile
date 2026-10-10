@@ -122,6 +122,7 @@ RUN apk add --no-cache \
     'libcrypto3>=3.3.7-r2' \
     'libssl3>=3.3.7-r2' \
     libpq \
+    'zlib>=1.3.2-r1' \
     zstd-libs \
     lz4-libs \
     krb5-libs \

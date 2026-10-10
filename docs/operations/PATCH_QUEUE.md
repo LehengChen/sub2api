@@ -28,6 +28,7 @@ as local patches during the next sync.
   Keep the Sub2API version and application feature set fixed.
 - Pin Vue 3.5.42 and source-map-js 1.2.2 to clear the release dependency
   audit's two High findings without changing frontend functionality.
+- Require runtime zlib >=1.3.2-r1 for CVE-2026-85091 from the image scan.
 - Regression evidence: `openai_capacity_failover_test.go`,
   `openai_slot_failover_test.go`, and the updated OAuth 429 service tests.
 
