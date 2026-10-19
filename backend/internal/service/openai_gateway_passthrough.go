@@ -213,7 +213,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 	if account != nil && account.IsOpenAI() {
 		responsesLite := isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) || isOpenAIResponsesLiteWebSocketPayload(body)
-		normalizedBody, normalized, normalizeErr := normalizeOpenAIResponsesWebSocketCompatibilityBody(body, account, responsesLite)
+		normalizedBody, normalized, normalizeErr := normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{
+			Config:        s.cfg,
+			ResponsesLite: responsesLite,
+			Compact:       isOpenAIResponsesCompactPath(c),
+		})
 		if normalizeErr != nil {
 			return nil, fmt.Errorf("normalize passthrough Responses compatibility: %w", normalizeErr)
 		}
@@ -1387,6 +1391,16 @@ func openAIStreamFailedEventErrorCode(payload []byte) string {
 // 上游在容量紧张时会把请求丢进降载路径：HTTP 200 之后立刻推 event: error
 // （code=server_is_overloaded / slow_down）并以 response.failed 收尾。
 func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
+	// Some upstream gateways return an SSE document with a non-2xx status
+	// (most often 502) instead of a JSON error object.  The normal JSON paths
+	// below cannot see that signal, but these exact provider markers are safe to
+	// classify without inspecting arbitrary request text.
+	lowerPayload := strings.ToLower(string(payload))
+	if !gjson.ValidBytes(payload) && (strings.Contains(lowerPayload, "gateway_concurrency_limit") ||
+		strings.Contains(lowerPayload, "concurrency limit exceeded for account") ||
+		isOpenAICapacityShedMessage(lowerPayload)) {
+		return true
+	}
 	switch openAIStreamFailedEventErrorCode(payload) {
 	case "server_is_overloaded", "slow_down":
 		return true
@@ -2343,6 +2357,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		capacityAccountMarked = true
 		s.markOpenAIOAuthCapacityOverloaded(ctx, account)
 	}
+	// Passthrough leaves upstream events untouched; the tracker only learns the
+	// upstream created_at so a synthesized response.failed matches the stream.
+	var createdAtTracker responsesCreatedAtStamper
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	currentSSEEventType := ""
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
@@ -2420,7 +2437,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return
 		}
 		clientPayload, _ := sanitizeOpenAIOAuthCapacityEventForClient(account, bareErrorPayload, "error")
-		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, clientPayload, failedMessage)); err != nil {
+		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, createdAtTracker.Value(), clientPayload, failedMessage)); err != nil {
 			clientDisconnected = true
 			return
 		}
@@ -2522,6 +2539,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						s.newOpenAIOAuthCapacityFailoverError(c, account, true, upstreamRequestID, dataBytes, "OpenAI upstream capacity shed", resp.Header)
 				}
 			}
+			createdAtTracker.Observe(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
 			}

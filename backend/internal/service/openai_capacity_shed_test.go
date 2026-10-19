@@ -121,6 +121,9 @@ func TestOpenAIOAuthCapacityShedEventRecognizesOnlyKnownSignals(t *testing.T) {
 		"observed overload message": {
 			payload: []byte(`{"type":"response.failed","error":{"type":"invalid_request_error","message":"` + openAIUpstreamOverloadMessage + `"}}`),
 		},
+		"raw SSE gateway concurrency marker": {
+			payload: []byte("event: response.failed\ndata: {\"response\":{\"error\":{\"code\":\"gateway_concurrency_limit\",\"message\":\"Concurrency limit exceeded for account, please retry later\"}}}\n\n"),
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -132,6 +135,7 @@ func TestOpenAIOAuthCapacityShedEventRecognizesOnlyKnownSignals(t *testing.T) {
 
 	nonCapacity := []byte(`{"type":"response.failed","error":{"type":"invalid_request_error","message":"The service rejected this invalid request."}}`)
 	require.False(t, isOpenAIOAuthCapacityShedEvent(oauth, nonCapacity, ""))
+	require.True(t, isOpenAIOAuthCapacityShedEvent(oauth, []byte("event: error\ndata: {\"error\":{\"code\":\"gateway_concurrency_limit\"}}\n\n"), ""))
 	require.False(t, isOpenAIOAuthCapacityShedEvent(oauth, nil, "Our servers are currently overloaded for maintenance. Please try again later."))
 	require.True(t, isOpenAITransientProcessingError(http.StatusBadRequest, openAIUpstreamOverloadMessage, nil),
 		"v0.2.0 recognizes the phrase generically; account-scoped handling above must remain OAuth-only")

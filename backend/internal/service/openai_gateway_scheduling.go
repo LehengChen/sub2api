@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
@@ -285,18 +286,16 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 	)
 }
 
-// NormalizeOpenAICompatiblePlatform 保留 grok 与国产 OpenAI 兼容供应商（kimi/zhipu/
-// deepseek）的原值，其他值一律归一为 openai。调度器据此对账号与请求做精确平台匹配：
+// NormalizeOpenAICompatiblePlatform 保留走 OpenAI 网关的平台（openai、grok 与多协议
+// API Key 供应商，见平台清单）的原值，其他值一律归一为 openai。调度器据此对账号与请求做精确平台匹配：
 // kimi 分组请求只命中 kimi 账号，语义与 openai/grok 一致。
 // （upstream 曾将本函数改为未导出 normalizeOpenAICompatiblePlatform，本分支的
 // handler 调度入口仍需导出，保持导出名。）
 func NormalizeOpenAICompatiblePlatform(platform string) string {
-	switch platform {
-	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo:
+	if domain.UsesOpenAIGateway(platform) {
 		return platform
-	default:
-		return PlatformOpenAI
 	}
+	return PlatformOpenAI
 }
 
 // noAvailableOpenAISelectionError builds the standard "no account available" error
@@ -441,7 +440,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 			return "quota_auto_pause"
 		}
 	}
-	if requestedModel != "" && !account.IsModelSupported(requestedModel) {
+	if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
 		return "model_not_supported"
 	}
 	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
@@ -1240,7 +1239,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 						}
 
 						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
+						// OAuth sessions are allowed to spill over immediately when the
+						// bound account is full. Waiting on the sticky account here can
+						// strand a request even though another account has a free slot;
+						// Layer 2 will probe the whole eligible pool before returning a
+						// wait plan. Keep the old bounded sticky wait for non-OAuth
+						// accounts whose upstream session state must remain pinned.
+						if !account.IsOpenAIOAuthLike() && waitingCount < cfg.StickySessionMaxWaiting {
 							selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,
@@ -1483,6 +1488,23 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			continue
+		}
+		// The load snapshot is advisory and may be stale by the time Layer 3
+		// runs. Probe each candidate once more before handing the request a wait
+		// plan; otherwise the first full account can absorb the queue while a
+		// later candidate is already idle.
+		if len(candidates) > 1 {
+			result, acquireErr := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+			if acquireErr == nil && result != nil && result.Acquired {
+				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
+				if selectErr != nil {
+					return nil, selectErr
+				}
+				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
+					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+				}
+				return selection, nil
+			}
 		}
 		return s.newSelectionResult(ctx, fresh, false, nil, &AccountWaitPlan{
 			AccountID:      fresh.ID,

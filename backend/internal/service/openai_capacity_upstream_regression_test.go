@@ -58,6 +58,7 @@ func TestOpenAIOAuthHTTPCapacityCoolsAndSwitchesAccount(t *testing.T) {
 		{400, `{"error":{"message":"Our servers are currently overloaded. Please try again later."}}`},
 		{400, `{"error":{"message":"Concurrency limit exceeded for account, please retry later"}}`},
 		{429, `{"error":{"message":"Concurrency limit exceeded for account, please retry later"}}`},
+		{502, "event: response.failed\ndata: {\"response\":{\"error\":{\"code\":\"gateway_concurrency_limit\",\"message\":\"Concurrency limit exceeded for account, please retry later\"}}}\n\n"},
 	} {
 		repo := &capacityShedAccountRepoStub{}
 		svc := &OpenAIGatewayService{accountRepo: repo}

@@ -54,15 +54,14 @@ func TestOpenAISlotFailoverReselectsAfterBusyAccount(t *testing.T) {
 			require.Contains(t, state.excluded, int64(1))
 			require.Equal(t, 1, count)
 			require.NotContains(t, rec.Body.String(), "error")
-			if !full {
-				require.True(t, started, "queue keepalives must not suppress reselection")
-			}
-			require.Equal(t, map[bool]int{false: 1, true: 0}[full], cache.releases)
+			require.False(t, started, "busy OAuth accounts should be skipped before queue keepalives start")
+			require.Equal(t, 0, cache.releases)
+			require.Zero(t, cache.waits, "busy OAuth slots should spill over before entering a wait queue")
 
 			// A second saturated candidate must not start another full queue wait.
 			_, result = h.acquireResponsesAccountSlot(c, nil, "", slotFailoverSelection(2), true, &started, zap.NewNop(), state)
 			require.Equal(t, openAISlotAcquireBusy, result)
-			require.Equal(t, 1, cache.waits)
+			require.Zero(t, cache.waits)
 			require.Equal(t, 2, count)
 
 			// The remaining candidate has a free slot and can proceed normally.
