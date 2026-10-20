@@ -113,10 +113,13 @@ LABEL description="Sub2API - AI API Gateway Platform"
 LABEL org.opencontainers.image.source="https://github.com/Wei-Shaw/sub2api"
 
 # Install runtime dependencies
-RUN apk add --no-cache \
+RUN apk upgrade --no-cache && apk add --no-cache \
     ca-certificates \
     tzdata \
     su-exec \
+    'libssl3>=3.3.7-r2' \
+    'libcrypto3>=3.3.7-r2' \
+    'zlib>=1.3.2-r1' \
     libpq \
     zstd-libs \
     lz4-libs \
