@@ -327,6 +327,18 @@ func TestGetOpenAICodexClientVersionFallsBackOnError(t *testing.T) {
 	require.Equal(t, codexCLIVersion, svc.GetOpenAICodexClientVersion(context.Background()))
 }
 
+// 配置库瞬时超时时保留上一次有效版本，避免请求身份抖回编译期旧值。
+func TestGetOpenAICodexClientVersionKeepsExpiredCachedValueOnError(t *testing.T) {
+	repo := &codexVersionSettingRepoStub{err: errors.New("db timeout")}
+	svc := NewSettingService(repo, nil)
+	svc.openAICodexVersionCache.Store(&cachedOpenAICodexClientVersion{
+		version:   "0.200.1",
+		expiresAt: time.Now().Add(-time.Second).UnixNano(),
+	})
+
+	require.Equal(t, "0.200.1", svc.GetOpenAICodexClientVersion(context.Background()))
+}
+
 // 规范 UA：面板未填完整 UA 时按当前生效版本号拼出标准 TUI 形态。
 func TestGetOpenAICodexCanonicalUserAgentBuildsFromVersion(t *testing.T) {
 	svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{

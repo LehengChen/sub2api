@@ -85,6 +85,12 @@ func TestIsOpenAICodexPlanGatedModelError(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "400 codex client version too old",
+			statusCode: http.StatusBadRequest,
+			body:       []byte(`{"error":{"message":"The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}`),
+			want:       true,
+		},
+		{
 			name:       "400 unrelated invalid request does not match",
 			statusCode: http.StatusBadRequest,
 			body:       []byte(`{"error":{"message":"Invalid schema for response_format 'agentic_plan'"}}`),

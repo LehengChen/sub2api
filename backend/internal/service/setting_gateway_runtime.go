@@ -369,11 +369,17 @@ func (s *SettingService) GetOpenAICodexClientVersion(ctx context.Context) string
 		})
 		if err != nil {
 			slog.Warn("failed to get openai codex client version setting", "error", err)
+			version := fallback
+			if cached, ok := s.openAICodexVersionCache.Load().(*cachedOpenAICodexClientVersion); ok && cached != nil {
+				if previous := NormalizeCodexClientVersion(cached.version); previous != "" {
+					version = previous
+				}
+			}
 			s.openAICodexVersionCache.Store(&cachedOpenAICodexClientVersion{
-				version:   fallback,
+				version:   version,
 				expiresAt: time.Now().Add(openAICodexClientVersionErrorTTL).UnixNano(),
 			})
-			return fallback, nil
+			return version, nil
 		}
 		version := NormalizeCodexClientVersion(values[SettingKeyOpenAICodexClientVersion])
 		if version == "" {
